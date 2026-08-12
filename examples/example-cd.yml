@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       runs-on:
-        description: 'Runner label for all jobs (e.g. ubuntu-latest or a self-hosted label).'
+        description: 'Runner label for all jobs. Use a string such as ubuntu-latest or a JSON array such as ["self-hosted","linux","x64"].'
         type: string
         default: 'ubuntu-latest'
   push:
@@ -36,7 +36,7 @@ permissions:
 jobs:
   # Resolve the runner label once so every downstream job shares it.
   config:
-    runs-on: ${{ inputs.runs-on || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(inputs.runs-on || 'ubuntu-latest', '[') && fromJSON(inputs.runs-on || 'ubuntu-latest') || inputs.runs-on || 'ubuntu-latest' }}
     outputs:
       runs-on: ${{ inputs.runs-on || 'ubuntu-latest' }}
     steps:
@@ -45,7 +45,7 @@ jobs:
   # projectType: terraform  (name: lz-shared, dependencies: [])
   lz-shared:
     needs: [config]
-    uses: ./.github/workflows/terraform.yml
+    uses: Remo-L5/github-action-templates/.github/workflows/terraform.yml@main
     with:
       runs-on: ${{ needs.config.outputs.runs-on }}
       module-path: '.'
@@ -65,7 +65,7 @@ jobs:
   # projectType: dotnet  (name: function-dev, dependencies: [lz-shared])
   function-dev:
     needs: [config, lz-shared]
-    uses: ./.github/workflows/dotnet.yml
+    uses: Remo-L5/github-action-templates/.github/workflows/dotnet.yml@main
     with:
       runs-on: ${{ needs.config.outputs.runs-on }}
       web-app-projects-path: '**/*.csproj'
@@ -75,7 +75,7 @@ jobs:
   # projectType: api-ops-cli  (name: publisher-dev, dependencies: [function-dev])
   publisher-dev:
     needs: [config, function-dev]
-    uses: ./.github/workflows/api-ops-cli.yml
+    uses: Remo-L5/github-action-templates/.github/workflows/api-ops-cli.yml@main
     with:
       runs-on: ${{ needs.config.outputs.runs-on }}
       artifacts-folder-path: 'apim-artifacts'
@@ -93,7 +93,7 @@ jobs:
   # projectType: api-center  (name: apicenter-dev, dependencies: [publisher-dev])
   apicenter-dev:
     needs: [config, publisher-dev]
-    uses: ./.github/workflows/api-center.yml
+    uses: Remo-L5/github-action-templates/.github/workflows/api-center.yml@main
     with:
       runs-on: ${{ needs.config.outputs.runs-on }}
       apis-folder-path: 'APIs'

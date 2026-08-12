@@ -35,6 +35,10 @@ inputs:
     description: 'File pattern to match additional var files (e.g. *.tfvars).'
     required: false
     default: '*.tfvars'
+  show-plan-output:
+    description: 'Print the Terraform plan to workflow logs. Keep disabled if the plan may contain sensitive values.'
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -57,8 +61,6 @@ runs:
         $modulePath = "${{ inputs.module-path }}"
         if ([string]::IsNullOrWhiteSpace($modulePath)) { $modulePath = "." }
 
-        # Change to module path before running plan
-        Push-Location $modulePath
         $arguments = @()
         $arguments += "-chdir=$modulePath"
         $arguments += "plan"
@@ -161,6 +163,7 @@ runs:
         if ($LASTEXITCODE -ne 0) { throw "terraform plan failed with exit code $LASTEXITCODE" }
 
     - name: Show the Plan for Review
+      if: inputs.show-plan-output == 'true'
       shell: pwsh
       run: |
         $modulePath = "${{ inputs.module-path }}"

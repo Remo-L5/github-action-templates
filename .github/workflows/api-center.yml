@@ -44,7 +44,7 @@ on:
         type: boolean
         default: false
       runs-on:
-        description: 'Runner label for all jobs (e.g. ubuntu-latest or a self-hosted label).'
+        description: 'Runner label for all jobs. Use a string such as ubuntu-latest or a JSON array such as ["self-hosted","linux","x64"].'
         type: string
         default: 'ubuntu-latest'
       validate-environment:
@@ -69,7 +69,7 @@ jobs:
   validate:
     name: Validate API Definitions
     if: ${{ !inputs.skip-validate-stage }}
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ startsWith(inputs.runs-on, '[') && fromJSON(inputs.runs-on) || inputs.runs-on }}
     environment: ${{ inputs.validate-environment }}
     steps:
       - name: Checkout
@@ -85,7 +85,7 @@ jobs:
           subscription-id: ${{ secrets.azure-subscription-id }}
 
       - name: Validate
-        uses: ./.github/actions/api-center-validate
+        uses: Remo-L5/github-action-templates/.github/actions/api-center-validate@main
         with:
           apis-folder-path: ${{ inputs.apis-folder-path }}
           subscription-id: ${{ inputs.subscription-id-override }}
@@ -99,7 +99,7 @@ jobs:
     name: Register APIs to API Center
     needs: validate
     if: ${{ always() && (inputs.skip-validate-stage || needs.validate.result == 'success') }}
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ startsWith(inputs.runs-on, '[') && fromJSON(inputs.runs-on) || inputs.runs-on }}
     environment: ${{ inputs.register-environment }}
     steps:
       - name: Checkout
@@ -115,7 +115,7 @@ jobs:
           subscription-id: ${{ secrets.azure-subscription-id }}
 
       - name: Register
-        uses: ./.github/actions/api-center-register
+        uses: Remo-L5/github-action-templates/.github/actions/api-center-register@main
         with:
           apis-folder-path: ${{ inputs.apis-folder-path }}
           resource-group-name: ${{ inputs.resource-group-name }}

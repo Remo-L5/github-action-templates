@@ -39,7 +39,7 @@ on:
         type: boolean
         default: false
       runs-on:
-        description: 'Runner label for all jobs (e.g. ubuntu-latest or a self-hosted label).'
+        description: 'Runner label for all jobs. Use a string such as ubuntu-latest or a JSON array such as ["self-hosted","linux","x64"].'
         type: string
         default: 'ubuntu-latest'
       plan-environment:
@@ -64,7 +64,7 @@ jobs:
   plan:
     name: Plan API-Ops CLI Changes (Dry-Run)
     if: ${{ !inputs.skip-plan-stage }}
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ startsWith(inputs.runs-on, '[') && fromJSON(inputs.runs-on) || inputs.runs-on }}
     environment: ${{ inputs.plan-environment }}
     steps:
       - name: Checkout
@@ -80,7 +80,7 @@ jobs:
           subscription-id: ${{ secrets.azure-subscription-id }}
 
       - name: Plan (apiops publish --dry-run)
-        uses: ./.github/actions/apiops-cli
+        uses: Remo-L5/github-action-templates/.github/actions/apiops-cli@main
         with:
           artifacts-folder-path: ${{ inputs.artifacts-folder-path }}
           environment: ${{ inputs.environment-label }}
@@ -97,7 +97,7 @@ jobs:
     name: Deploy API-Ops CLI Changes
     needs: plan
     if: ${{ always() && (inputs.skip-plan-stage || needs.plan.result == 'success') }}
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ startsWith(inputs.runs-on, '[') && fromJSON(inputs.runs-on) || inputs.runs-on }}
     environment: ${{ inputs.deploy-environment }}
     steps:
       - name: Checkout
@@ -113,7 +113,7 @@ jobs:
           subscription-id: ${{ secrets.azure-subscription-id }}
 
       - name: Deploy (apiops publish)
-        uses: ./.github/actions/apiops-cli
+        uses: Remo-L5/github-action-templates/.github/actions/apiops-cli@main
         with:
           artifacts-folder-path: ${{ inputs.artifacts-folder-path }}
           environment: ${{ inputs.environment-label }}

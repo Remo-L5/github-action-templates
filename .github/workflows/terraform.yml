@@ -32,7 +32,7 @@ on:
         type: string
         default: '{}'
       runs-on:
-        description: 'Runner label for all jobs (e.g. ubuntu-latest or a self-hosted label).'
+        description: 'Runner label for all jobs. Use a string such as ubuntu-latest or a JSON array such as ["self-hosted","linux","x64"].'
         type: string
         default: 'ubuntu-latest'
       plan-environment:
@@ -51,6 +51,10 @@ on:
         description: 'File pattern to match additional var files.'
         type: string
         default: '*.tfvars'
+      show-plan-output:
+        description: 'Print the Terraform plan to workflow logs. Keep disabled if the plan may contain sensitive values.'
+        type: boolean
+        default: false
       # --- Subscription vending (optional) ---
       subscription-vending-run:
         description: 'Enable subscription vending mode (fetch var file from a storage table).'
@@ -97,7 +101,7 @@ permissions:
 jobs:
   plan:
     name: Plan with Terraform
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ startsWith(inputs.runs-on, '[') && fromJSON(inputs.runs-on) || inputs.runs-on }}
     environment: ${{ inputs.plan-environment }}
     env:
       TF_VAR_FILE_NAME: ${{ inputs.subscription-vending-run && format('{0}-{1}.auto.tfvars', inputs.partition-key, inputs.row-key) || '' }}
@@ -120,7 +124,7 @@ jobs:
 
       - name: Get subscription vending record
         if: inputs.subscription-vending-run
-        uses: ./.github/actions/az-storage-table-get-record
+        uses: Remo-L5/github-action-templates/.github/actions/az-storage-table-get-record@main
         with:
           storage-account-name: ${{ inputs.table-storage-account-name }}
           table-name: ${{ inputs.table-name }}
@@ -129,7 +133,7 @@ jobs:
           module-path: ${{ inputs.module-path }}
 
       - name: Terraform Init
-        uses: ./.github/actions/terraform-init
+        uses: Remo-L5/github-action-templates/.github/actions/terraform-init@main
         with:
           client-id: ${{ secrets.azure-plan-client-id }}
           tenant-id: ${{ secrets.azure-tenant-id }}
@@ -141,7 +145,7 @@ jobs:
           module-path: ${{ inputs.module-path }}
 
       - name: Terraform Workspace
-        uses: ./.github/actions/terraform-workspace
+        uses: Remo-L5/github-action-templates/.github/actions/terraform-workspace@main
         with:
           client-id: ${{ secrets.azure-plan-client-id }}
           tenant-id: ${{ secrets.azure-tenant-id }}
@@ -150,7 +154,7 @@ jobs:
           module-path: ${{ inputs.module-path }}
 
       - name: Terraform Plan
-        uses: ./.github/actions/terraform-plan
+        uses: Remo-L5/github-action-templates/.github/actions/terraform-plan@main
         with:
           client-id: ${{ secrets.azure-plan-client-id }}
           tenant-id: ${{ secrets.azure-tenant-id }}
@@ -161,27 +165,32 @@ jobs:
           var-file-name: ${{ env.TF_VAR_FILE_NAME }}
           additional-var-files-directory: ${{ inputs.additional-var-files-directory }}
           additional-var-files-pattern: ${{ inputs.additional-var-files-pattern }}
+          show-plan-output: ${{ inputs.show-plan-output }}
 
-      - name: Publish Module Artifact
+      - name: Publish Terraform Plan Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: module
-          include-hidden-files: true
-          path: |
-            ${{ inputs.module-path }}
-            !**/.git/**
-            !**/.github/**
+          name: terraform-plan
+          path: ${{ inputs.module-path }}/tfplan
+          if-no-files-found: error
+          retention-days: 1
 
   apply:
     name: Apply with Terraform
     needs: plan
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ startsWith(inputs.runs-on, '[') && fromJSON(inputs.runs-on) || inputs.runs-on }}
     environment: ${{ inputs.apply-environment }}
+    concurrency:
+      group: terraform-${{ github.repository }}-${{ inputs.module-path }}-${{ inputs.terraform-workspace }}-${{ inputs.apply-environment || 'default' }}
+      cancel-in-progress: false
     steps:
-      - name: Download Module Artifact
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Terraform Plan Artifact
         uses: actions/download-artifact@v4
         with:
-          name: module
+          name: terraform-plan
           path: ${{ inputs.module-path }}
 
       - name: Azure Login (OIDC)
@@ -198,7 +207,7 @@ jobs:
           terraform_wrapper: false
 
       - name: Terraform Init
-        uses: ./.github/actions/terraform-init
+        uses: Remo-L5/github-action-templates/.github/actions/terraform-init@main
         with:
           client-id: ${{ secrets.azure-apply-client-id }}
           tenant-id: ${{ secrets.azure-tenant-id }}
@@ -210,7 +219,7 @@ jobs:
           module-path: ${{ inputs.module-path }}
 
       - name: Terraform Workspace
-        uses: ./.github/actions/terraform-workspace
+        uses: Remo-L5/github-action-templates/.github/actions/terraform-workspace@main
         with:
           client-id: ${{ secrets.azure-apply-client-id }}
           tenant-id: ${{ secrets.azure-tenant-id }}
@@ -219,7 +228,7 @@ jobs:
           module-path: ${{ inputs.module-path }}
 
       - name: Terraform Apply
-        uses: ./.github/actions/terraform-apply
+        uses: Remo-L5/github-action-templates/.github/actions/terraform-apply@main
         with:
           client-id: ${{ secrets.azure-apply-client-id }}
           tenant-id: ${{ secrets.azure-tenant-id }}

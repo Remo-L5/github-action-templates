@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       runs-on:
-        description: 'Runner label for all jobs (e.g. ubuntu-latest or a self-hosted label).'
+        description: 'Runner label for all jobs. Use a string such as ubuntu-latest or a JSON array such as ["self-hosted","linux","x64"].'
         type: string
         default: 'ubuntu-latest'
   pull_request:
@@ -23,7 +23,7 @@ permissions:
 jobs:
   # Resolve the runner label once so every downstream job shares it.
   config:
-    runs-on: ${{ inputs.runs-on || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(inputs.runs-on || 'ubuntu-latest', '[') && fromJSON(inputs.runs-on || 'ubuntu-latest') || inputs.runs-on || 'ubuntu-latest' }}
     outputs:
       runs-on: ${{ inputs.runs-on || 'ubuntu-latest' }}
     steps:
@@ -31,7 +31,7 @@ jobs:
 
   terraform-ci:
     needs: [config]
-    uses: ./.github/workflows/ci.yml
+    uses: Remo-L5/github-action-templates/.github/workflows/ci.yml@main
     with:
       runs-on: ${{ needs.config.outputs.runs-on }}
       module-path: '.'

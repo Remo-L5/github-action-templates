@@ -12,15 +12,13 @@ It supports multiple project types — **Terraform**, **API Operations (APIOps t
 
 ```
 .github/
-├── workflows/                         # Reusable workflows (workflow_call) + example callers
+├── workflows/                         # Reusable workflows (workflow_call)
 │   ├── terraform.yml                  # Terraform plan + apply
 │   ├── ci.yml                         # Terraform fmt/validate + review plan (PRs)
 │   ├── dotnet.yml                     # Build + publish .NET apps
 │   ├── api-ops.yml                    # APIOps toolkit plan/deploy
 │   ├── api-ops-cli.yml                # APIOps CLI plan/deploy
-│   ├── api-center.yml                 # API Center validate/register
-│   ├── example-cd.yml                 # Example CD caller wiring multiple projects
-│   └── example-ci.yml                 # Example CI caller
+│   └── api-center.yml                 # API Center validate/register
 └── actions/                           # Composite actions (step-level helpers)
     ├── terraform-init/
     ├── terraform-plan/
@@ -31,6 +29,9 @@ It supports multiple project types — **Terraform**, **API Operations (APIOps t
     ├── apiops-cli/                    # APIOps CLI (plan via dry-run, or deploy)
     ├── api-center-validate/
     └── api-center-register/
+examples/
+├── example-cd.yml                      # Example CD caller wiring multiple projects
+└── example-ci.yml                      # Example CI caller
 ```
 
 ## How the Azure DevOps concepts map to GitHub Actions
@@ -44,7 +45,7 @@ It supports multiple project types — **Terraform**, **API Operations (APIOps t
 | Variable group | Repository/Environment **secrets** and **variables** |
 | Environment (approvals) | GitHub **Environment** on a job |
 | `terraform-installer.yaml` | `hashicorp/setup-terraform@v3` |
-| Self-hosted `pool: ado-devops-pool` | `runs-on` input (single label; default `ubuntu-latest`) |
+| Self-hosted `pool: ado-devops-pool` | `runs-on` input (single label or JSON label array; default `ubuntu-latest`) |
 | `##vso[task.setvariable ...;isOutput=true]` | `>> $GITHUB_OUTPUT` |
 | `##vso[task.setvariable variable=PATH]` | `>> $GITHUB_PATH` |
 | `##vso[task.logissue type=error]` | `::error::` workflow command |
@@ -74,16 +75,17 @@ bearer token via `az account get-access-token` after `azure/login`.
 
 ### `terraform.yml` — Plan + Apply
 Two jobs: `plan` (checkout → setup-terraform → optional vending record → init → workspace → plan →
-upload `module` artifact) and `apply` (download artifact → init → workspace → apply). The plan and apply
+upload short-lived `tfplan` artifact) and `apply` (checkout → download plan artifact → init → workspace → apply). The plan and apply
 jobs can use **separate identities** (`azure-plan-client-id` / `azure-apply-client-id`) for least privilege;
 set both to the same value if you only have one.
 
 Key inputs: `module-path`, `terraform-version`, `terraform-workspace`, `terraform-action` (`apply`/`destroy`),
 `override-vars` (JSON string), `plan-environment`, `apply-environment`, `subscription-vending-run`,
-`table-*`, `partition-key`, `row-key`, `additional-var-files-*`, `runs-on`.
+`table-*`, `partition-key`, `row-key`, `additional-var-files-*`, `show-plan-output`, `runs-on`.
 
 ### `ci.yml` — Validation
-`validate` job (fmt check, `init -backend=false`, validate) plus a gated `plan` job for review.
+`validate` job (fmt check, `init -backend=false`, validate) plus a gated `plan` job. Set
+`show-plan-output: true` only when the plan is safe to print to logs.
 
 ### `dotnet.yml`
 Installs the SDK, builds, publishes, and uploads the output artifact.
@@ -101,27 +103,28 @@ Node.js-based equivalent. `plan` runs `apiops publish --dry-run`; `deploy` runs 
 
 Azure DevOps expanded a `projects` array with a `dependencies` list into stages at compile time.
 GitHub Actions cannot dynamically generate jobs from an arbitrary array, so express the same dependency
-graph explicitly with `needs:`. See [example-cd.yml](.github/workflows/example-cd.yml):
+graph explicitly with `needs:`. See [example-cd.yml](examples/example-cd.yml):
 
 ```yaml
 jobs:
   lz-shared:                       # terraform
-    uses: ./.github/workflows/terraform.yml
+    uses: Remo-L5/github-action-templates/.github/workflows/terraform.yml@main
     # ...
   function-dev:                    # dotnet, depends on lz-shared
     needs: [lz-shared]
-    uses: ./.github/workflows/dotnet.yml
+    uses: Remo-L5/github-action-templates/.github/workflows/dotnet.yml@main
   publisher-dev:                   # api-ops-cli, depends on function-dev
     needs: [function-dev]
-    uses: ./.github/workflows/api-ops-cli.yml
+    uses: Remo-L5/github-action-templates/.github/workflows/api-ops-cli.yml@main
   apicenter-dev:                   # api-center, depends on publisher-dev
     needs: [publisher-dev]
-    uses: ./.github/workflows/api-center.yml
+    uses: Remo-L5/github-action-templates/.github/workflows/api-center.yml@main
 ```
 
 ## Choosing the runner
 
-Every reusable workflow accepts a `runs-on` input (single label, default `ubuntu-latest`). The example
+Every reusable workflow accepts a `runs-on` input (single label, default `ubuntu-latest`, or a JSON label
+array such as `["self-hosted","linux","x64"]`). The example
 callers expose it once at the entry point: a `runs-on` `workflow_dispatch` input feeds a tiny `config` job,
 whose output is passed to every downstream job via `needs.config.outputs.runs-on`. To target self-hosted
 runners, set the dispatch input (for manual runs) or change the single fallback in the `config` job:
@@ -132,11 +135,11 @@ on:
     inputs:
       runs-on:
         type: string
-        default: 'ubuntu-latest'   # e.g. self-hosted
+        default: 'ubuntu-latest'   # e.g. ["self-hosted","linux","x64"]
 
 jobs:
   config:
-    runs-on: ${{ inputs.runs-on || 'ubuntu-latest' }}
+    runs-on: ${{ startsWith(inputs.runs-on || 'ubuntu-latest', '[') && fromJSON(inputs.runs-on || 'ubuntu-latest') || inputs.runs-on || 'ubuntu-latest' }}
     outputs:
       runs-on: ${{ inputs.runs-on || 'ubuntu-latest' }}
     steps:
@@ -144,7 +147,7 @@ jobs:
 
   lz-shared:
     needs: [config]
-    uses: ./.github/workflows/terraform.yml
+    uses: Remo-L5/github-action-templates/.github/workflows/terraform.yml@main
     with:
       runs-on: ${{ needs.config.outputs.runs-on }}
     # ...
@@ -165,8 +168,8 @@ jobs:
 
 ## Using these templates from another repository
 
-The example callers reference the workflows with a local path (`./.github/workflows/...`). To consume them
-from a **different** repository, reference them by `owner/repo/.github/workflows/<file>@ref`:
+Copy the example callers from `examples/` into a consuming repository's `.github/workflows/` directory and
+reference reusable workflows by `owner/repo/.github/workflows/<file>@ref`:
 
 ```yaml
 jobs:
@@ -175,9 +178,22 @@ jobs:
     # ...
 ```
 
-Composite actions referenced as `./.github/actions/...` inside a reusable workflow resolve against the
-repository that **defines** the workflow, so cross-repo consumption works when the actions live beside the
-workflows in this repo.
+Composite actions are referenced with fully qualified `Remo-L5/github-action-templates/.github/actions/...@main`
+paths inside the reusable workflows. This avoids depending on the caller repository having a matching
+`.github/actions` folder after `actions/checkout`.
+
+## Security and leakage tracking
+
+Terraform plan files and generated `.auto.tfvars` files can contain environment-specific configuration and,
+depending on module design, sensitive values. The Terraform deployment workflow now checks out the caller
+repository in the apply job and uploads only the generated `tfplan` artifact with one-day retention instead
+of uploading the full module directory. Subscription-vending records and generated HCL files are no longer
+printed to logs, and Terraform plan output is hidden unless `show-plan-output` is explicitly enabled.
+
+Track suspected template hardening gaps as normal GitHub issues labeled `security-hardening`. If you confirm
+that a secret or sensitive value was exposed in logs, artifacts, git history, or a public issue, use a private
+GitHub Security Advisory or private incident channel instead, rotate the affected credential, and delete or
+expire affected workflow artifacts.
 
 ## License
 

@@ -49,23 +49,21 @@ runs:
         fi
 
         TABLE_URL="https://${{ inputs.storage-account-name }}.table.core.windows.net/${{ inputs.table-name }}(PartitionKey='${{ inputs.partition-key }}',RowKey='${{ inputs.row-key }}')"
-        echo "Table URL: $TABLE_URL"
+        echo "Storage table endpoint prepared."
 
-        RESPONSE=$(curl -s -w "\n%{http_code}" \
-          -H "Authorization: Bearer $STORAGE_ACCOUNT_ACCESS_TOKEN" \
-          -H "Accept: application/json;odata=nometadata" \
-          -H "x-ms-version: 2020-12-06" \
-          "$TABLE_URL")
+        CURL_HEADERS=(
+          -H "Authorization: Bearer ${STORAGE_ACCOUNT_ACCESS_TOKEN}"
+          -H "Accept: application/json;odata=nometadata"
+          -H "x-ms-version: 2020-12-06"
+        )
+        RESPONSE=$(curl -s -w "\n%{http_code}" "${CURL_HEADERS[@]}" "$TABLE_URL")
 
         HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
         RESPONSE_BODY=$(echo "$RESPONSE" | head -n -1)
         echo "HTTP Status Code: $HTTP_CODE"
 
         if [ "$HTTP_CODE" -eq 200 ]; then
-          echo "::group::Successfully retrieved table record"
-          echo "$RESPONSE_BODY" | jq '.' || echo "$RESPONSE_BODY"
-          echo "::endgroup::"
-          # Persist the body to a file so the next step can consume it safely
+          echo "Successfully retrieved table record."
           echo "$RESPONSE_BODY" > "${RUNNER_TEMP}/table-record.json"
           echo "record-exists=true" >> "$GITHUB_OUTPUT"
         elif [ "$HTTP_CODE" -eq 404 ]; then
@@ -176,9 +174,5 @@ runs:
           fi
         done
 
-        echo "::group::Generated HCL variable file"
-        echo "File path: $HCL_FILE"
-        cat "$HCL_FILE"
-        echo "::endgroup::"
-
+        echo "Generated HCL variable file: $HCL_FILE"
         echo "hcl-file-path=$HCL_FILE" >> "$GITHUB_OUTPUT"
