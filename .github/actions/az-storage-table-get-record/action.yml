@@ -1,0 +1,184 @@
+name: 'Get Azure Storage Table Record'
+description: 'Fetch a record from an Azure Storage Table and convert it to a Terraform .auto.tfvars file (subscription vending support).'
+
+inputs:
+  storage-account-name:
+    description: 'Storage account hosting the table.'
+    required: true
+  table-name:
+    description: 'Storage table name.'
+    required: true
+  partition-key:
+    description: 'PartitionKey of the record to fetch.'
+    required: true
+  row-key:
+    description: 'RowKey of the record to fetch.'
+    required: true
+  module-path:
+    description: 'Directory where the generated .auto.tfvars file should be written.'
+    required: false
+    default: '.'
+
+outputs:
+  record-exists:
+    description: 'Whether the table record was found (true/false).'
+    value: ${{ steps.get.outputs.record-exists }}
+  hcl-file-path:
+    description: 'Path to the generated HCL variable file (if created).'
+    value: ${{ steps.convert.outputs.hcl-file-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Get Storage Table Record
+      id: get
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "Fetching record from Azure Storage Table..."
+        echo "Storage Account: ${{ inputs.storage-account-name }}"
+        echo "Table Name: ${{ inputs.table-name }}"
+        echo "Partition Key: ${{ inputs.partition-key }}"
+        echo "Row Key: ${{ inputs.row-key }}"
+
+        echo "Getting access token for storage account..."
+        STORAGE_ACCOUNT_ACCESS_TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
+        if [ -z "$STORAGE_ACCOUNT_ACCESS_TOKEN" ]; then
+          echo "::error::Failed to get access token for storage account"
+          exit 1
+        fi
+
+        TABLE_URL="https://${{ inputs.storage-account-name }}.table.core.windows.net/${{ inputs.table-name }}(PartitionKey='${{ inputs.partition-key }}',RowKey='${{ inputs.row-key }}')"
+        echo "Table URL: $TABLE_URL"
+
+        RESPONSE=$(curl -s -w "\n%{http_code}" \
+          -H "Authorization: Bearer $STORAGE_ACCOUNT_ACCESS_TOKEN" \
+          -H "Accept: application/json;odata=nometadata" \
+          -H "x-ms-version: 2020-12-06" \
+          "$TABLE_URL")
+
+        HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+        RESPONSE_BODY=$(echo "$RESPONSE" | head -n -1)
+        echo "HTTP Status Code: $HTTP_CODE"
+
+        if [ "$HTTP_CODE" -eq 200 ]; then
+          echo "::group::Successfully retrieved table record"
+          echo "$RESPONSE_BODY" | jq '.' || echo "$RESPONSE_BODY"
+          echo "::endgroup::"
+          # Persist the body to a file so the next step can consume it safely
+          echo "$RESPONSE_BODY" > "${RUNNER_TEMP}/table-record.json"
+          echo "record-exists=true" >> "$GITHUB_OUTPUT"
+        elif [ "$HTTP_CODE" -eq 404 ]; then
+          echo "::warning::Table record not found (PartitionKey: '${{ inputs.partition-key }}', RowKey: '${{ inputs.row-key }}')"
+          echo "record-exists=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "::error::Failed to retrieve table record. HTTP Status: $HTTP_CODE"
+          echo "Response: $RESPONSE_BODY"
+          exit 1
+        fi
+
+    - name: Convert to HCL Variable File
+      id: convert
+      if: steps.get.outputs.record-exists == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "Converting storage table record to HCL variable file..."
+        TABLE_DATA=$(cat "${RUNNER_TEMP}/table-record.json")
+
+        if [ -z "$TABLE_DATA" ] || [ "$TABLE_DATA" = "null" ]; then
+          echo "::error::No table data available to convert"
+          exit 1
+        fi
+
+        OUTPUT_DIR="${{ inputs.module-path }}"
+        mkdir -p "$OUTPUT_DIR"
+        HCL_FILENAME="${{ inputs.partition-key }}-${{ inputs.row-key }}.auto.tfvars"
+        HCL_FILE="$OUTPUT_DIR/$HCL_FILENAME"
+
+        echo "Creating HCL variable file: $HCL_FILE"
+        echo "# Terraform variables generated from Azure Storage Table: ${{ inputs.table-name }} (PartitionKey: ${{ inputs.partition-key }}, RowKey: ${{ inputs.row-key }})" > "$HCL_FILE"
+        echo "" >> "$HCL_FILE"
+
+        echo "$TABLE_DATA" | jq -r '
+          def is_valid_json: try (fromjson | true) catch false;
+          def json_to_hcl:
+            if type == "object" then
+              "{\n" +
+              (to_entries | map(
+                "  \"" + .key + "\" = " +
+                (if (.value | type) == "string" then
+                  "\"" + (.value | tostring) + "\""
+                elif (.value | type) == "boolean" then
+                  (.value | tostring)
+                elif (.value | type) == "number" then
+                  (.value | tostring)
+                elif (.value | type) == "array" then
+                  (.value | json_to_hcl)
+                elif (.value | type) == "object" then
+                  (.value | json_to_hcl)
+                else
+                  "\"" + (.value | tostring) + "\""
+                end)
+              ) | join("\n")) + "\n}"
+            elif type == "array" then
+              "[" +
+              (map(
+                if (. | type) == "string" then
+                  "\"" + (. | tostring) + "\""
+                elif (. | type) == "boolean" then
+                  (. | tostring)
+                elif (. | type) == "number" then
+                  (. | tostring)
+                elif (. | type) == "array" then
+                  (. | json_to_hcl)
+                elif (. | type) == "object" then
+                  (. | json_to_hcl)
+                else
+                  "\"" + (. | tostring) + "\""
+                end
+              ) | join(", ")) + "]"
+            else
+              "\"" + (. | tostring) + "\""
+            end;
+          [keys[] | select(. != "PartitionKey" and . != "RowKey" and . != "Timestamp" and . != "etag" and . != "odata.etag")] as $keys |
+          ($keys | sort) as $sorted_keys |
+          $sorted_keys[] as $key |
+          .[$key] as $value |
+          ($key | ascii_downcase | gsub("[^a-z0-9_]"; "_")) as $hcl_var_name |
+          if $value == null or $value == "" then
+            "# " + $hcl_var_name + " = \"\""
+          elif ($value | type) == "string" then
+            if ($value | ascii_downcase) == "true" then
+              $hcl_var_name + " = true"
+            elif ($value | ascii_downcase) == "false" then
+              $hcl_var_name + " = false"
+            elif ($value | is_valid_json) then
+              $hcl_var_name + " = " + ($value | fromjson | json_to_hcl)
+            else
+              $hcl_var_name + " = \"" + $value + "\""
+            end
+          elif ($value | type) == "boolean" then
+            $hcl_var_name + " = " + ($value | tostring)
+          elif ($value | type) == "number" then
+            $hcl_var_name + " = " + ($value | tostring)
+          elif ($value | type) == "array" then
+            $hcl_var_name + " = " + ($value | json_to_hcl)
+          elif ($value | type) == "object" then
+            $hcl_var_name + " = " + ($value | json_to_hcl)
+          else
+            $hcl_var_name + " = \"" + ($value | tostring) + "\""
+          end
+        ' | while IFS= read -r line; do
+          if [ -n "$line" ]; then
+            echo "$line" >> "$HCL_FILE"
+            echo "" >> "$HCL_FILE"
+          fi
+        done
+
+        echo "::group::Generated HCL variable file"
+        echo "File path: $HCL_FILE"
+        cat "$HCL_FILE"
+        echo "::endgroup::"
+
+        echo "hcl-file-path=$HCL_FILE" >> "$GITHUB_OUTPUT"

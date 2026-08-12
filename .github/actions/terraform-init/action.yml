@@ -1,0 +1,61 @@
+name: 'Terraform Init'
+description: 'Initialize Terraform against an Azure Storage backend using OIDC (workload identity federation).'
+
+inputs:
+  client-id:
+    description: 'Azure AD application (client) ID used for OIDC login.'
+    required: true
+  tenant-id:
+    description: 'Azure AD tenant ID.'
+    required: true
+  subscription-id:
+    description: 'Azure subscription ID.'
+    required: true
+  backend-resource-group:
+    description: 'Resource group that holds the backend storage account.'
+    required: true
+  backend-storage-account:
+    description: 'Backend storage account name.'
+    required: true
+  backend-container:
+    description: 'Backend storage account container name.'
+    required: true
+  backend-key:
+    description: 'Backend state file key (blob name).'
+    required: false
+    default: 'terraform.tfstate'
+  module-path:
+    description: 'Path to the Terraform root module (relative to the workspace).'
+    required: false
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - name: Terraform Init
+      shell: pwsh
+      env:
+        ARM_CLIENT_ID: ${{ inputs.client-id }}
+        ARM_TENANT_ID: ${{ inputs.tenant-id }}
+        ARM_SUBSCRIPTION_ID: ${{ inputs.subscription-id }}
+        ARM_USE_OIDC: 'true'
+        ARM_USE_AZUREAD: 'true'
+        BACKEND_AZURE_RESOURCE_GROUP_NAME: ${{ inputs.backend-resource-group }}
+        BACKEND_AZURE_STORAGE_ACCOUNT_NAME: ${{ inputs.backend-storage-account }}
+        BACKEND_AZURE_STORAGE_ACCOUNT_CONTAINER_NAME: ${{ inputs.backend-container }}
+        BACKEND_AZURE_STORAGE_ACCOUNT_CONTAINER_KEY_NAME: ${{ inputs.backend-key }}
+      run: |
+        $modulePath = "${{ inputs.module-path }}"
+        if ([string]::IsNullOrWhiteSpace($modulePath)) { $modulePath = "." }
+
+        $arguments = @()
+        $arguments += "-chdir=$modulePath"
+        $arguments += "init"
+        $arguments += "-backend-config=storage_account_name=$($env:BACKEND_AZURE_STORAGE_ACCOUNT_NAME)"
+        $arguments += "-backend-config=container_name=$($env:BACKEND_AZURE_STORAGE_ACCOUNT_CONTAINER_NAME)"
+        $arguments += "-backend-config=key=$($env:BACKEND_AZURE_STORAGE_ACCOUNT_CONTAINER_KEY_NAME)"
+        $arguments += "-backend-config=resource_group_name=$($env:BACKEND_AZURE_RESOURCE_GROUP_NAME)"
+
+        Write-Host "Running: terraform $arguments"
+        & terraform @arguments
+        if ($LASTEXITCODE -ne 0) { throw "terraform init failed with exit code $LASTEXITCODE" }

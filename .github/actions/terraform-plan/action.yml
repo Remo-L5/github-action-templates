@@ -1,0 +1,168 @@
+name: 'Terraform Plan'
+description: 'Generate and save a Terraform execution plan (supports CLI vars, a single var file, and additional var files).'
+
+inputs:
+  client-id:
+    description: 'Azure AD application (client) ID used for OIDC login.'
+    required: true
+  tenant-id:
+    description: 'Azure AD tenant ID.'
+    required: true
+  subscription-id:
+    description: 'Azure subscription ID.'
+    required: true
+  terraform-action:
+    description: "Action to plan for: 'apply' or 'destroy'."
+    required: false
+    default: 'apply'
+  module-path:
+    description: 'Path to the Terraform root module (relative to the workspace).'
+    required: false
+    default: '.'
+  override-vars:
+    description: 'JSON object string of Terraform variables to pass as -var flags (ignored when var-file-name is set).'
+    required: false
+    default: '{}'
+  var-file-name:
+    description: 'Name of a Terraform var file inside the module path (leave empty to use CLI variables only).'
+    required: false
+    default: ''
+  additional-var-files-directory:
+    description: 'Directory to scan for additional var files (absolute or relative to the module path).'
+    required: false
+    default: ''
+  additional-var-files-pattern:
+    description: 'File pattern to match additional var files (e.g. *.tfvars).'
+    required: false
+    default: '*.tfvars'
+
+runs:
+  using: composite
+  steps:
+    - name: Terraform Plan
+      shell: pwsh
+      env:
+        ARM_CLIENT_ID: ${{ inputs.client-id }}
+        ARM_TENANT_ID: ${{ inputs.tenant-id }}
+        ARM_SUBSCRIPTION_ID: ${{ inputs.subscription-id }}
+        ARM_USE_OIDC: 'true'
+        ARM_USE_AZUREAD: 'true'
+        TERRAFORM_ACTION: ${{ inputs.terraform-action }}
+        TERRAFORM_OVERRIDE_VARS: ${{ inputs.override-vars }}
+        TERRAFORM_VAR_FILE_NAME: ${{ inputs.var-file-name }}
+        ADDITIONAL_VAR_FILES_DIRECTORY: ${{ inputs.additional-var-files-directory }}
+        ADDITIONAL_VAR_FILES_PATTERN: ${{ inputs.additional-var-files-pattern }}
+      run: |
+        $command = "terraform"
+        $modulePath = "${{ inputs.module-path }}"
+        if ([string]::IsNullOrWhiteSpace($modulePath)) { $modulePath = "." }
+
+        # Change to module path before running plan
+        Push-Location $modulePath
+        $arguments = @()
+        $arguments += "-chdir=$modulePath"
+        $arguments += "plan"
+        $arguments += "-out=tfplan"
+        $arguments += "-input=false"
+
+        # Check if we should use a specific var file or CLI vars
+        $terraformVarFileName = $env:TERRAFORM_VAR_FILE_NAME
+
+        if ($null -ne $terraformVarFileName -and $terraformVarFileName.Trim() -ne '') {
+            Write-Host "Using Terraform variable file: $terraformVarFileName"
+            $varFilePath = Join-Path -Path $modulePath -ChildPath $terraformVarFileName
+
+            if (Test-Path -Path $varFilePath -PathType Leaf) {
+                Write-Host "Found var file: $varFilePath"
+                # For .auto.tfvars files, they are loaded automatically, but we can still specify them explicitly
+                if ($terraformVarFileName.EndsWith(".auto.tfvars")) {
+                    Write-Host "Note: .auto.tfvars files are loaded automatically by Terraform"
+                } else {
+                    Write-Host "Adding var file to terraform arguments"
+                    $arguments += "-var-file=$terraformVarFileName"
+                }
+                Write-Host "Variable file mode: Skipping CLI variables (override-vars will be ignored)"
+            } else {
+                Write-Host "::error::Specified terraform var file not found: $varFilePath"
+                Write-Error "The terraform variable file '$terraformVarFileName' does not exist in the module path '$modulePath'."
+                exit 1
+            }
+        } else {
+            Write-Host "No terraform var file specified. Using CLI variables only."
+
+            $terraformOverrideVars = $env:TERRAFORM_OVERRIDE_VARS
+            if ($null -ne $terraformOverrideVars -and $terraformOverrideVars.Trim() -ne '' -and $terraformOverrideVars.Trim() -ne '{}') {
+              try {
+                  Write-Host "Terraform override variables provided."
+                  $terraformVars = $terraformOverrideVars | ConvertFrom-Json
+                  foreach ($property in $terraformVars.PSObject.Properties) {
+                      $key = $property.Name
+                      Write-Host "Processing variable: $key"
+                      $value = $property.Value
+                      $valueType = $value.GetType().Name
+                      if ($valueType -eq 'Boolean') {
+                        $value = if ($value -eq $true) { "true" } else { "false" }
+                      } elseif ($value -is [int] -or $value -is [double]) {
+                        $value = $value.ToString().ToLower()
+                      } elseif ($value -is [string]) {
+                        if ($value -eq "True") {
+                          $value = "true"
+                        } elseif ($value -eq "False") {
+                          $value = "false"
+                        } else {
+                          $value = $value.Trim()
+                        }
+                      }
+                      $arguments += "-var=$key=$value"
+                  }
+              } catch {
+                  Write-Error "Failed to parse override-vars as JSON: $_"
+              }
+            } else {
+                Write-Host "override-vars is null or empty. Skipping JSON conversion."
+            }
+        }
+
+        if ($env:TERRAFORM_ACTION -eq 'destroy') {
+          $arguments += "-destroy"
+        }
+
+        # Process additional var files from directory with pattern
+        $additionalVarFilesDir = $env:ADDITIONAL_VAR_FILES_DIRECTORY
+        $additionalVarFilesPattern = $env:ADDITIONAL_VAR_FILES_PATTERN
+
+        if ($null -ne $additionalVarFilesDir -and $additionalVarFilesDir.Trim() -ne '') {
+            $varFilesPath = $additionalVarFilesDir
+            if (-not [System.IO.Path]::IsPathRooted($varFilesPath)) {
+                $varFilesPath = Join-Path -Path $modulePath -ChildPath $additionalVarFilesDir
+            }
+
+            Write-Host "Scanning for additional var files in: $varFilesPath"
+            Write-Host "Using pattern: $additionalVarFilesPattern"
+
+            if (Test-Path -Path $varFilesPath -PathType Container) {
+                $matchingFiles = Get-ChildItem -Path $varFilesPath -Filter $additionalVarFilesPattern -File | Sort-Object Name
+                if ($matchingFiles.Count -gt 0) {
+                    Write-Host "Found $($matchingFiles.Count) matching var file(s):"
+                    foreach ($varFile in $matchingFiles) {
+                        Write-Host "  - $($varFile.Name)"
+                        $arguments += "-var-file=$($varFile.FullName)"
+                    }
+                } else {
+                    Write-Host "No files matching pattern '$additionalVarFilesPattern' found in '$varFilesPath'"
+                }
+            } else {
+                Write-Warning "Additional var files directory not found: $varFilesPath"
+            }
+        }
+
+        Write-Host "Running: $command $arguments"
+        & $command @arguments
+        if ($LASTEXITCODE -ne 0) { throw "terraform plan failed with exit code $LASTEXITCODE" }
+
+    - name: Show the Plan for Review
+      shell: pwsh
+      run: |
+        $modulePath = "${{ inputs.module-path }}"
+        if ([string]::IsNullOrWhiteSpace($modulePath)) { $modulePath = "." }
+        terraform -chdir="$modulePath" show tfplan

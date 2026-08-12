@@ -1,0 +1,128 @@
+name: 'API-Ops CLI'
+description: 'Run the Azure/apiops-cli (Node.js) to plan (dry-run) or deploy APIM configuration. Requires a prior azure/login step.'
+
+inputs:
+  artifacts-folder-path:
+    description: 'Folder (relative to repo root) where the APIM artifacts reside.'
+    required: false
+    default: 'apim-artifacts'
+  environment:
+    description: 'Environment label (display only).'
+    required: true
+  resource-group-name:
+    description: 'APIM resource group name.'
+    required: true
+  apim-service-name:
+    description: 'APIM instance name.'
+    required: true
+  subscription-id:
+    description: 'Azure subscription ID override (leave empty to use the logged-in subscription).'
+    required: false
+    default: ''
+  overrides-file-path:
+    description: 'Per-environment overrides YAML (relative to artifacts-folder-path).'
+    required: false
+    default: ''
+  commit-id:
+    description: 'Git commit SHA for incremental publish (leave empty to process all).'
+    required: false
+    default: ''
+  apiops-cli-version:
+    description: "apiops-cli npm package version (e.g. 'latest' or '0.2.1-alpha.0')."
+    required: false
+    default: 'latest'
+  spec-format:
+    description: 'Optional API spec format override (e.g. openapi-v3-yaml).'
+    required: false
+    default: ''
+  dry-run:
+    description: 'Run apiops publish in dry-run (plan) mode.'
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Use Node.js 22.x
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22.x'
+
+    - name: Install apiops-cli
+      shell: pwsh
+      run: |
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = "Stop"
+        $cliVersion = "${{ inputs.apiops-cli-version }}"
+        if ([string]::IsNullOrWhiteSpace($cliVersion) -or $cliVersion -eq 'latest') {
+          npm install -g "@peterhauge/apiops-cli"
+        } else {
+          npm install -g "@peterhauge/apiops-cli@$cliVersion"
+        }
+        if ($LASTEXITCODE -ne 0) { throw "Failed to install apiops-cli." }
+        apiops --version
+
+    - name: Resolve subscription ID
+      id: sub
+      shell: pwsh
+      run: |
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = "Stop"
+        $subscriptionIdOverride = "${{ inputs.subscription-id }}"
+        if (-not [string]::IsNullOrWhiteSpace($subscriptionIdOverride)) {
+          $subscriptionId = $subscriptionIdOverride
+        } else {
+          $subscriptionId = az account show --query "id" --output tsv 2>$null
+          if ([string]::IsNullOrWhiteSpace($subscriptionId)) {
+            throw "Could not determine subscription ID. Provide subscription-id, or ensure the login is scoped to a subscription."
+          }
+        }
+        "subscription-id=$subscriptionId" >> $env:GITHUB_OUTPUT
+
+    - name: Run apiops publish (${{ inputs.dry-run == 'true' && 'Plan / dry-run' || 'Deploy' }})
+      shell: pwsh
+      run: |
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = "Stop"
+
+        $mode = if ("${{ inputs.dry-run }}" -eq "true") { "Plan (Dry-Run)" } else { "Deploy" }
+        Write-Host "=========================================="
+        Write-Host "API-Ops CLI $mode"
+        Write-Host "Environment:    ${{ inputs.environment }}"
+        Write-Host "APIM Service:   ${{ inputs.apim-service-name }}"
+        Write-Host "Resource Group: ${{ inputs.resource-group-name }}"
+        Write-Host "=========================================="
+
+        $apiopsArgs = @(
+          "publish",
+          "--resource-group", "${{ inputs.resource-group-name }}",
+          "--service-name",   "${{ inputs.apim-service-name }}",
+          "--source",         "${{ github.workspace }}/${{ inputs.artifacts-folder-path }}",
+          "--subscription-id","${{ steps.sub.outputs.subscription-id }}"
+        )
+
+        if ("${{ inputs.dry-run }}" -eq "true") { $apiopsArgs += "--dry-run" }
+
+        $overridesFilePath = "${{ inputs.overrides-file-path }}"
+        if (-not [string]::IsNullOrWhiteSpace($overridesFilePath)) {
+          $apiopsArgs += "--overrides"
+          $apiopsArgs += "${{ github.workspace }}/${{ inputs.artifacts-folder-path }}/$overridesFilePath"
+        }
+
+        $commitId = "${{ inputs.commit-id }}"
+        if (-not [string]::IsNullOrWhiteSpace($commitId)) {
+          $apiopsArgs += "--commit-id"
+          $apiopsArgs += $commitId
+        }
+
+        $specFormat = "${{ inputs.spec-format }}"
+        if (-not [string]::IsNullOrWhiteSpace($specFormat)) {
+          $apiopsArgs += "--spec-format"
+          $apiopsArgs += $specFormat
+        }
+
+        Write-Host "Running: apiops $($apiopsArgs -join ' ')"
+        & apiops @apiopsArgs
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) { throw "apiops publish failed with exit code: $exitCode" }
+        Write-Host "$mode SUCCEEDED"

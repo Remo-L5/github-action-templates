@@ -1,0 +1,143 @@
+name: 'API-Ops Publisher'
+description: 'Run the Azure/apiops publisher to plan (dry-run) or deploy APIM configuration. Requires a prior azure/login step.'
+
+inputs:
+  apim-service-output-folder-path:
+    description: 'Folder (relative to repo root) where the APIM artifacts reside.'
+    required: false
+    default: 'artifacts'
+  environment:
+    description: 'Environment label (display only).'
+    required: true
+  resource-group-name:
+    description: 'APIM resource group name.'
+    required: true
+  apim-service-name:
+    description: 'APIM instance name.'
+    required: true
+  subscription-id:
+    description: 'Azure subscription ID override (leave empty to use the logged-in subscription).'
+    required: false
+    default: ''
+  configuration-file-format:
+    description: 'Configuration file format (Yaml or Json).'
+    required: false
+    default: 'Yaml'
+  configuration-file-path:
+    description: 'Optional configuration file (relative to the artifacts folder).'
+    required: false
+    default: ''
+  commit-id:
+    description: 'Optional commit ID for incremental publish.'
+    required: false
+    default: ''
+  apiops-release-version:
+    description: 'Azure/apiops release version (GitHub release tag).'
+    required: false
+    default: 'v7.0.0-rc.1.0.0'
+  dry-run:
+    description: 'Run the publisher in dry-run (plan) mode.'
+    required: false
+    default: 'false'
+  strict-validation:
+    description: 'Enable strict validation (dry-run only, v7.0.0+).'
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve Azure credentials
+      id: creds
+      shell: pwsh
+      run: |
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = "Stop"
+
+        $token = az account get-access-token --query "accessToken" --output tsv 2>$null
+        if ([string]::IsNullOrWhiteSpace($token)) { throw "Failed to acquire Azure access token. Ensure azure/login ran first." }
+        Write-Host "::add-mask::$token"
+        "bearer-token=$token" >> $env:GITHUB_OUTPUT
+
+        $subscriptionIdOverride = "${{ inputs.subscription-id }}"
+        if (-not [string]::IsNullOrWhiteSpace($subscriptionIdOverride)) {
+          $subscriptionId = $subscriptionIdOverride
+        } else {
+          $subscriptionId = az account show --query "id" --output tsv 2>$null
+          if ([string]::IsNullOrWhiteSpace($subscriptionId)) {
+            throw "Could not determine subscription ID. Provide subscription-id, or ensure the login is scoped to a subscription."
+          }
+        }
+        "subscription-id=$subscriptionId" >> $env:GITHUB_OUTPUT
+
+    - name: Fetch publisher
+      shell: pwsh
+      run: |
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = "Stop"
+        $InformationPreference = "Continue"
+
+        $releaseFileName = "publisher-linux-x64.zip"
+        $executableFileName = "publisher"
+        if ("${{ runner.os }}" -like "*Windows*") {
+          $releaseFileName = "publisher-win-x64.zip"
+          $executableFileName = "publisher.exe"
+        }
+        elseif ("${{ runner.os }}" -like "*macOS*" -and "${{ runner.arch }}" -like "*ARM*") {
+          $releaseFileName = "publisher-osx-arm64.zip"
+        }
+        elseif ("${{ runner.os }}" -like "*macOS*") {
+          $releaseFileName = "publisher-osx-x64.zip"
+        }
+
+        $version = "${{ inputs.apiops-release-version }}"
+        $uri = "https://github.com/Azure/apiops/releases/download/$version/$releaseFileName"
+        $downloadFilePath = Join-Path "${{ runner.temp }}" $releaseFileName
+        Write-Information "Downloading $uri ..."
+        Invoke-WebRequest -Uri "$uri" -OutFile "$downloadFilePath"
+
+        $executableFolderPath = Join-Path "${{ runner.temp }}" "publisher"
+        Expand-Archive -Path "$downloadFilePath" -DestinationPath "$executableFolderPath" -Force
+        $executableFilePath = Join-Path "$executableFolderPath" $executableFileName
+
+        if ("${{ runner.os }}" -like "*Linux*" -or "${{ runner.os }}" -like "*macOS*") {
+          & chmod +x "$executableFilePath"
+        }
+
+        "PUBLISHER_FILE_PATH=$executableFilePath" >> $env:GITHUB_ENV
+
+    - name: Run publisher (${{ inputs.dry-run == 'true' && 'Plan / dry-run' || 'Deploy' }})
+      shell: pwsh
+      env:
+        API_SPECIFICATION_FORMAT: ${{ inputs.configuration-file-format }}
+        AZURE_BEARER_TOKEN: ${{ steps.creds.outputs.bearer-token }}
+        AZURE_SUBSCRIPTION_ID: ${{ steps.creds.outputs.subscription-id }}
+        AZURE_RESOURCE_GROUP_NAME: ${{ inputs.resource-group-name }}
+        API_MANAGEMENT_SERVICE_OUTPUT_FOLDER_PATH: ${{ github.workspace }}/${{ inputs.apim-service-output-folder-path }}
+        API_MANAGEMENT_SERVICE_NAME: ${{ inputs.apim-service-name }}
+        CONFIGURATION_YAML_PATH: ${{ inputs.configuration-file-path != '' && format('{0}/{1}/{2}', github.workspace, inputs.apim-service-output-folder-path, inputs.configuration-file-path) || '' }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        STRICT_VALIDATION: ${{ inputs.strict-validation }}
+        COMMIT_ID: ${{ inputs.commit-id }}
+        Logging__LogLevel__Default: 'Information'
+        ARM_API_VERSION: '2024-05-01'
+      run: |
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = "Stop"
+
+        $mode = if ("${{ inputs.dry-run }}" -eq "true") { "Plan (Dry-Run)" } else { "Deploy" }
+        Write-Host "=========================================="
+        Write-Host "API-Ops $mode"
+        Write-Host "Environment:    ${{ inputs.environment }}"
+        Write-Host "APIM Service:   ${{ inputs.apim-service-name }}"
+        Write-Host "Resource Group: ${{ inputs.resource-group-name }}"
+        Write-Host "=========================================="
+
+        # Empty CONFIGURATION_YAML_PATH should not be passed to the publisher
+        if ([string]::IsNullOrWhiteSpace($env:CONFIGURATION_YAML_PATH)) { $env:CONFIGURATION_YAML_PATH = $null }
+        if ([string]::IsNullOrWhiteSpace($env:COMMIT_ID)) { $env:COMMIT_ID = $null }
+
+        & "$env:PUBLISHER_FILE_PATH"
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) { throw "Publisher failed with exit code: $exitCode" }
+        Write-Host "$mode SUCCEEDED"

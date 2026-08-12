@@ -1,0 +1,121 @@
+# Terraform CI reusable workflow (equivalent to ci-template.yaml)
+#
+# Validation-focused workflow for pull requests:
+#   - fmt check, init (-backend=false), validate
+#   - a plan job (with real backend) for review, gated by an optional Environment
+name: Terraform CI
+
+on:
+  workflow_call:
+    inputs:
+      module-path:
+        description: 'Path to the Terraform root module (relative to the repo root).'
+        type: string
+        default: '.'
+      terraform-version:
+        description: "Terraform CLI version (e.g. '1.9.5' or 'latest')."
+        type: string
+        default: 'latest'
+      terraform-workspace:
+        description: 'Terraform workspace to select. Also used as the backend state key prefix.'
+        type: string
+        default: 'dev'
+      runs-on:
+        description: 'Runner label for all jobs (e.g. ubuntu-latest or a self-hosted label).'
+        type: string
+        default: 'ubuntu-latest'
+      environment:
+        description: 'GitHub Environment for the plan job.'
+        type: string
+        default: ''
+    secrets:
+      azure-tenant-id:
+        required: true
+      azure-subscription-id:
+        required: true
+      azure-plan-client-id:
+        required: true
+      backend-resource-group:
+        required: true
+      backend-storage-account:
+        required: true
+      backend-container:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  validate:
+    name: Validate Terraform
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version == 'latest' && '' || inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Terraform Format Check
+        run: terraform -chdir="${{ inputs.module-path }}" fmt -check
+
+      - name: Terraform Init (no backend)
+        run: terraform -chdir="${{ inputs.module-path }}" init -backend=false
+
+      - name: Terraform Validate
+        run: terraform -chdir="${{ inputs.module-path }}" validate
+
+  plan:
+    name: Validate Terraform Plan
+    needs: validate
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.azure-plan-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version == 'latest' && '' || inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        uses: ./.github/actions/terraform-init
+        with:
+          client-id: ${{ secrets.azure-plan-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+          backend-resource-group: ${{ secrets.backend-resource-group }}
+          backend-storage-account: ${{ secrets.backend-storage-account }}
+          backend-container: ${{ secrets.backend-container }}
+          backend-key: ${{ inputs.terraform-workspace }}/terraform.tfstate
+          module-path: ${{ inputs.module-path }}
+
+      - name: Terraform Workspace
+        uses: ./.github/actions/terraform-workspace
+        with:
+          client-id: ${{ secrets.azure-plan-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+          terraform-workspace: ${{ inputs.terraform-workspace }}
+          module-path: ${{ inputs.module-path }}
+
+      - name: Terraform Plan
+        uses: ./.github/actions/terraform-plan
+        with:
+          client-id: ${{ secrets.azure-plan-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+          module-path: ${{ inputs.module-path }}

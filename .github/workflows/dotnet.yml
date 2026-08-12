@@ -1,0 +1,61 @@
+# .NET build + publish reusable workflow (equivalent to helpers/dotnet/dotnet.yaml)
+#
+# Builds and publishes .NET projects and uploads the zipped output as an artifact.
+name: DotNet
+
+on:
+  workflow_call:
+    inputs:
+      web-app-projects-path:
+        description: 'Glob path to the .NET project(s) to build/publish.'
+        type: string
+        default: '**/*.csproj'
+      zip-artifact-name:
+        description: 'Name of the published artifact.'
+        type: string
+        default: 'dotnet-app'
+      dotnet-version:
+        description: '.NET SDK version (e.g. 9.x, 8.0.x).'
+        type: string
+        default: '9.x'
+      build-configuration:
+        description: 'Build configuration.'
+        type: string
+        default: 'Release'
+      runs-on:
+        description: 'Runner label for all jobs (e.g. ubuntu-latest or a self-hosted label).'
+        type: string
+        default: 'ubuntu-latest'
+      environment:
+        description: 'GitHub Environment for the build job.'
+        type: string
+        default: ''
+
+jobs:
+  build_project:
+    name: DotNet
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet-version }}
+
+      - name: dotnet build
+        run: dotnet build ${{ inputs.web-app-projects-path }} --configuration ${{ inputs.build-configuration }}
+
+      - name: dotnet publish
+        run: >-
+          dotnet publish ${{ inputs.web-app-projects-path }}
+          --configuration ${{ inputs.build-configuration }}
+          --output "${{ runner.temp }}/WebApp_${{ github.run_number }}"
+
+      - name: Publish build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.zip-artifact-name }}
+          path: ${{ runner.temp }}/WebApp_${{ github.run_number }}

@@ -1,0 +1,136 @@
+# API-Ops (Azure/apiops toolkit) reusable workflow — Plan/Deploy (equivalent to helpers/api-ops/api-ops.yaml)
+#
+#   - plan job:   dry-run the publisher to validate changes (no modifications to APIM)
+#   - deploy job: run the publisher to apply changes
+#
+# Requires Azure/apiops v7.0.0+ for dry-run support. Auth uses OIDC + a bearer token.
+name: API-Ops
+
+on:
+  workflow_call:
+    inputs:
+      apim-service-output-folder-path:
+        description: 'Folder (relative to repo root) where the APIM artifacts reside.'
+        type: string
+        default: 'artifacts'
+      environment-label:
+        description: 'Environment label (display only).'
+        type: string
+        default: 'dev'
+      resource-group-name:
+        type: string
+        required: true
+      apim-service-name:
+        type: string
+        required: true
+      subscription-id-override:
+        description: 'Azure subscription ID override (leave empty to use the logged-in subscription).'
+        type: string
+        default: ''
+      configuration-file-format:
+        type: string
+        default: 'Yaml'
+      configuration-file-path:
+        type: string
+        default: ''
+      commit-id:
+        type: string
+        default: ''
+      apiops-release-version:
+        type: string
+        default: 'v7.0.0-rc.1.0.0'
+      strict-validation:
+        type: boolean
+        default: true
+      skip-plan-stage:
+        description: 'Skip the plan (dry-run) job and deploy directly.'
+        type: boolean
+        default: false
+      runs-on:
+        description: 'Runner label for all jobs (e.g. ubuntu-latest or a self-hosted label).'
+        type: string
+        default: 'ubuntu-latest'
+      plan-environment:
+        type: string
+        default: 'apiops-plan'
+      deploy-environment:
+        type: string
+        default: 'apiops-deploy'
+    secrets:
+      azure-client-id:
+        required: true
+      azure-tenant-id:
+        required: true
+      azure-subscription-id:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan:
+    name: Plan API-Ops Changes (Dry-Run)
+    if: ${{ !inputs.skip-plan-stage }}
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.plan-environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.azure-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+
+      - name: Plan (dry-run publisher)
+        uses: ./.github/actions/apiops-publisher
+        with:
+          apim-service-output-folder-path: ${{ inputs.apim-service-output-folder-path }}
+          environment: ${{ inputs.environment-label }}
+          resource-group-name: ${{ inputs.resource-group-name }}
+          apim-service-name: ${{ inputs.apim-service-name }}
+          subscription-id: ${{ inputs.subscription-id-override }}
+          configuration-file-format: ${{ inputs.configuration-file-format }}
+          configuration-file-path: ${{ inputs.configuration-file-path }}
+          commit-id: ${{ inputs.commit-id }}
+          apiops-release-version: ${{ inputs.apiops-release-version }}
+          dry-run: 'true'
+          strict-validation: ${{ inputs.strict-validation }}
+
+  deploy:
+    name: Deploy API-Ops Changes
+    needs: plan
+    if: ${{ always() && (inputs.skip-plan-stage || needs.plan.result == 'success') }}
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.deploy-environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.azure-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+
+      - name: Deploy (run publisher)
+        uses: ./.github/actions/apiops-publisher
+        with:
+          apim-service-output-folder-path: ${{ inputs.apim-service-output-folder-path }}
+          environment: ${{ inputs.environment-label }}
+          resource-group-name: ${{ inputs.resource-group-name }}
+          apim-service-name: ${{ inputs.apim-service-name }}
+          subscription-id: ${{ inputs.subscription-id-override }}
+          configuration-file-format: ${{ inputs.configuration-file-format }}
+          configuration-file-path: ${{ inputs.configuration-file-path }}
+          commit-id: ${{ inputs.commit-id }}
+          apiops-release-version: ${{ inputs.apiops-release-version }}
+          dry-run: 'false'

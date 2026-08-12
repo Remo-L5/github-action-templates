@@ -1,0 +1,127 @@
+# API-Ops CLI reusable workflow — Plan/Deploy (equivalent to helpers/api-ops-cli/api-ops-cli.yaml)
+#
+# Uses the Node.js-based Azure/apiops-cli instead of the toolkit binaries:
+#   - plan job:   apiops publish --dry-run (validate, no changes)
+#   - deploy job: apiops publish (apply changes)
+name: API-Ops CLI
+
+on:
+  workflow_call:
+    inputs:
+      artifacts-folder-path:
+        type: string
+        default: 'apim-artifacts'
+      environment-label:
+        type: string
+        default: 'dev'
+      resource-group-name:
+        type: string
+        required: true
+      apim-service-name:
+        type: string
+        required: true
+      subscription-id-override:
+        type: string
+        default: ''
+      overrides-file-path:
+        type: string
+        default: ''
+      commit-id:
+        type: string
+        default: ''
+      apiops-cli-version:
+        type: string
+        default: 'latest'
+      spec-format:
+        type: string
+        default: ''
+      skip-plan-stage:
+        type: boolean
+        default: false
+      runs-on:
+        description: 'Runner label for all jobs (e.g. ubuntu-latest or a self-hosted label).'
+        type: string
+        default: 'ubuntu-latest'
+      plan-environment:
+        type: string
+        default: 'apiops-plan'
+      deploy-environment:
+        type: string
+        default: 'apiops-deploy'
+    secrets:
+      azure-client-id:
+        required: true
+      azure-tenant-id:
+        required: true
+      azure-subscription-id:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan:
+    name: Plan API-Ops CLI Changes (Dry-Run)
+    if: ${{ !inputs.skip-plan-stage }}
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.plan-environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.azure-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+
+      - name: Plan (apiops publish --dry-run)
+        uses: ./.github/actions/apiops-cli
+        with:
+          artifacts-folder-path: ${{ inputs.artifacts-folder-path }}
+          environment: ${{ inputs.environment-label }}
+          resource-group-name: ${{ inputs.resource-group-name }}
+          apim-service-name: ${{ inputs.apim-service-name }}
+          subscription-id: ${{ inputs.subscription-id-override }}
+          overrides-file-path: ${{ inputs.overrides-file-path }}
+          commit-id: ${{ inputs.commit-id }}
+          apiops-cli-version: ${{ inputs.apiops-cli-version }}
+          spec-format: ${{ inputs.spec-format }}
+          dry-run: 'true'
+
+  deploy:
+    name: Deploy API-Ops CLI Changes
+    needs: plan
+    if: ${{ always() && (inputs.skip-plan-stage || needs.plan.result == 'success') }}
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.deploy-environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.azure-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+
+      - name: Deploy (apiops publish)
+        uses: ./.github/actions/apiops-cli
+        with:
+          artifacts-folder-path: ${{ inputs.artifacts-folder-path }}
+          environment: ${{ inputs.environment-label }}
+          resource-group-name: ${{ inputs.resource-group-name }}
+          apim-service-name: ${{ inputs.apim-service-name }}
+          subscription-id: ${{ inputs.subscription-id-override }}
+          overrides-file-path: ${{ inputs.overrides-file-path }}
+          commit-id: ${{ inputs.commit-id }}
+          apiops-cli-version: ${{ inputs.apiops-cli-version }}
+          spec-format: ${{ inputs.spec-format }}
+          dry-run: 'false'

@@ -1,0 +1,47 @@
+name: 'Terraform Workspace'
+description: 'Select an existing Terraform workspace or create it if it does not exist.'
+
+inputs:
+  client-id:
+    description: 'Azure AD application (client) ID used for OIDC login.'
+    required: true
+  tenant-id:
+    description: 'Azure AD tenant ID.'
+    required: true
+  subscription-id:
+    description: 'Azure subscription ID.'
+    required: true
+  terraform-workspace:
+    description: 'Name of the Terraform workspace to select or create.'
+    required: true
+  module-path:
+    description: 'Path to the Terraform root module (relative to the workspace).'
+    required: false
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - name: Terraform Set Workspace
+      shell: pwsh
+      env:
+        ARM_CLIENT_ID: ${{ inputs.client-id }}
+        ARM_TENANT_ID: ${{ inputs.tenant-id }}
+        ARM_SUBSCRIPTION_ID: ${{ inputs.subscription-id }}
+        ARM_USE_OIDC: 'true'
+        ARM_USE_AZUREAD: 'true'
+      run: |
+        $workspaceName = "${{ inputs.terraform-workspace }}"
+        $modulePath = "${{ inputs.module-path }}"
+        if ([string]::IsNullOrWhiteSpace($modulePath)) { $modulePath = "." }
+
+        Push-Location $modulePath
+
+        $existingWorkspaces = terraform workspace list
+
+        if ($existingWorkspaces -match $workspaceName) {
+          terraform workspace select $workspaceName
+        } else {
+          terraform workspace new $workspaceName
+          terraform workspace select $workspaceName
+        }

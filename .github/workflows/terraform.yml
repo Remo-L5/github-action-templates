@@ -1,0 +1,227 @@
+# Terraform Plan + Apply reusable workflow (equivalent to helpers/terraform/terraform.yaml)
+#
+# Mirrors the Azure DevOps plan/apply stage pattern:
+#   - plan job:  checkout -> setup-terraform -> [storage table] -> init -> workspace -> plan -> upload artifact
+#   - apply job: download artifact -> setup-terraform -> init -> workspace -> apply
+#
+# Azure authentication uses OIDC (workload identity federation). The caller must grant
+# `permissions: id-token: write` and pass the Azure identity via secrets.
+name: Terraform
+
+on:
+  workflow_call:
+    inputs:
+      terraform-action:
+        description: "Action to perform: 'apply' or 'destroy'."
+        type: string
+        default: 'apply'
+      module-path:
+        description: 'Path to the Terraform root module (relative to the repo root).'
+        type: string
+        default: '.'
+      terraform-version:
+        description: "Terraform CLI version (e.g. '1.9.5' or 'latest')."
+        type: string
+        default: 'latest'
+      terraform-workspace:
+        description: 'Terraform workspace to select or create. Also used as the backend state key prefix.'
+        type: string
+        default: 'dev'
+      override-vars:
+        description: 'JSON object string of Terraform variables passed as -var flags.'
+        type: string
+        default: '{}'
+      runs-on:
+        description: 'Runner label for all jobs (e.g. ubuntu-latest or a self-hosted label).'
+        type: string
+        default: 'ubuntu-latest'
+      plan-environment:
+        description: 'GitHub Environment for the plan job (approvals/secrets).'
+        type: string
+        default: ''
+      apply-environment:
+        description: 'GitHub Environment for the apply job (approvals/secrets).'
+        type: string
+        default: ''
+      additional-var-files-directory:
+        description: 'Directory to scan for additional var files.'
+        type: string
+        default: ''
+      additional-var-files-pattern:
+        description: 'File pattern to match additional var files.'
+        type: string
+        default: '*.tfvars'
+      # --- Subscription vending (optional) ---
+      subscription-vending-run:
+        description: 'Enable subscription vending mode (fetch var file from a storage table).'
+        type: boolean
+        default: false
+      table-storage-account-name:
+        description: 'Storage account hosting the vending table.'
+        type: string
+        default: ''
+      table-name:
+        description: 'Vending table name.'
+        type: string
+        default: 'researchLzVending'
+      partition-key:
+        description: 'Vending record PartitionKey.'
+        type: string
+        default: 'NOT_SET'
+      row-key:
+        description: 'Vending record RowKey.'
+        type: string
+        default: 'NOT_SET'
+    secrets:
+      azure-tenant-id:
+        required: true
+      azure-subscription-id:
+        required: true
+      azure-plan-client-id:
+        description: 'Client ID used for the plan job (read/plan identity).'
+        required: true
+      azure-apply-client-id:
+        description: 'Client ID used for the apply job (write/apply identity). Reuse the plan ID if you only have one.'
+        required: true
+      backend-resource-group:
+        required: true
+      backend-storage-account:
+        required: true
+      backend-container:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  plan:
+    name: Plan with Terraform
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.plan-environment }}
+    env:
+      TF_VAR_FILE_NAME: ${{ inputs.subscription-vending-run && format('{0}-{1}.auto.tfvars', inputs.partition-key, inputs.row-key) || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.azure-plan-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version == 'latest' && '' || inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Get subscription vending record
+        if: inputs.subscription-vending-run
+        uses: ./.github/actions/az-storage-table-get-record
+        with:
+          storage-account-name: ${{ inputs.table-storage-account-name }}
+          table-name: ${{ inputs.table-name }}
+          partition-key: ${{ inputs.partition-key }}
+          row-key: ${{ inputs.row-key }}
+          module-path: ${{ inputs.module-path }}
+
+      - name: Terraform Init
+        uses: ./.github/actions/terraform-init
+        with:
+          client-id: ${{ secrets.azure-plan-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+          backend-resource-group: ${{ secrets.backend-resource-group }}
+          backend-storage-account: ${{ secrets.backend-storage-account }}
+          backend-container: ${{ secrets.backend-container }}
+          backend-key: ${{ inputs.terraform-workspace }}/terraform.tfstate
+          module-path: ${{ inputs.module-path }}
+
+      - name: Terraform Workspace
+        uses: ./.github/actions/terraform-workspace
+        with:
+          client-id: ${{ secrets.azure-plan-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+          terraform-workspace: ${{ inputs.terraform-workspace }}
+          module-path: ${{ inputs.module-path }}
+
+      - name: Terraform Plan
+        uses: ./.github/actions/terraform-plan
+        with:
+          client-id: ${{ secrets.azure-plan-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+          terraform-action: ${{ inputs.terraform-action }}
+          module-path: ${{ inputs.module-path }}
+          override-vars: ${{ inputs.override-vars }}
+          var-file-name: ${{ env.TF_VAR_FILE_NAME }}
+          additional-var-files-directory: ${{ inputs.additional-var-files-directory }}
+          additional-var-files-pattern: ${{ inputs.additional-var-files-pattern }}
+
+      - name: Publish Module Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: module
+          include-hidden-files: true
+          path: |
+            ${{ inputs.module-path }}
+            !**/.git/**
+            !**/.github/**
+
+  apply:
+    name: Apply with Terraform
+    needs: plan
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.apply-environment }}
+    steps:
+      - name: Download Module Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: module
+          path: ${{ inputs.module-path }}
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.azure-apply-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version == 'latest' && '' || inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        uses: ./.github/actions/terraform-init
+        with:
+          client-id: ${{ secrets.azure-apply-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+          backend-resource-group: ${{ secrets.backend-resource-group }}
+          backend-storage-account: ${{ secrets.backend-storage-account }}
+          backend-container: ${{ secrets.backend-container }}
+          backend-key: ${{ inputs.terraform-workspace }}/terraform.tfstate
+          module-path: ${{ inputs.module-path }}
+
+      - name: Terraform Workspace
+        uses: ./.github/actions/terraform-workspace
+        with:
+          client-id: ${{ secrets.azure-apply-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+          terraform-workspace: ${{ inputs.terraform-workspace }}
+          module-path: ${{ inputs.module-path }}
+
+      - name: Terraform Apply
+        uses: ./.github/actions/terraform-apply
+        with:
+          client-id: ${{ secrets.azure-apply-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+          module-path: ${{ inputs.module-path }}

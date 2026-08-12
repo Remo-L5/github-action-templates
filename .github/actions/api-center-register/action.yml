@@ -1,0 +1,272 @@
+name: 'API Center Register'
+description: 'Register API definition files to Azure API Center (create + import pattern with custom properties). Requires a prior azure/login step.'
+
+inputs:
+  apis-folder-path:
+    description: 'Folder containing API definition files.'
+    required: false
+    default: 'APIs'
+  resource-group-name:
+    description: 'API Center resource group name.'
+    required: true
+  api-center-service-name:
+    description: 'API Center instance name.'
+    required: true
+  subscription-id:
+    description: 'Azure subscription ID override.'
+    required: false
+    default: ''
+  api-definition-pattern:
+    description: 'Glob pattern for API definition files.'
+    required: false
+    default: '**/*.yaml'
+  metadata-file-path:
+    description: 'Metadata JSON file name found in each API folder (optional).'
+    required: false
+    default: ''
+  register-only-changed:
+    description: 'Register only files changed in this commit/PR (based on git diff).'
+    required: false
+    default: 'true'
+  apic-extension-version:
+    description: 'Azure CLI apic-extension version.'
+    required: false
+    default: '1.0.0b5'
+
+runs:
+  using: composite
+  steps:
+    - name: Setup and Discover API Files
+      id: discover
+      shell: pwsh
+      env:
+        SUBSCRIPTION_ID_OVERRIDE: ${{ inputs.subscription-id }}
+        APIS_FOLDER_PATH: ${{ inputs.apis-folder-path }}
+        API_DEFINITION_PATTERN: ${{ inputs.api-definition-pattern }}
+        REGISTER_ONLY_CHANGED: ${{ inputs.register-only-changed }}
+        APIC_EXTENSION_VERSION: ${{ inputs.apic-extension-version }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        $InformationPreference = "Continue"
+
+        $extVersion = $env:APIC_EXTENSION_VERSION
+        az extension remove --name apic-extension 2>$null
+        az extension add --name apic-extension --version $extVersion --yes
+        az extension show --name apic-extension --query version -o tsv
+
+        if (-not [string]::IsNullOrWhiteSpace($env:SUBSCRIPTION_ID_OVERRIDE)) { az account set --subscription $env:SUBSCRIPTION_ID_OVERRIDE }
+
+        $sourcesDir = "${{ github.workspace }}"
+        $apisFolderPath = "$sourcesDir/$($env:APIS_FOLDER_PATH)"
+        $pattern = $env:API_DEFINITION_PATTERN
+        $registerOnlyChanged = [System.Convert]::ToBoolean($env:REGISTER_ONLY_CHANGED)
+
+        if (-not (Test-Path $apisFolderPath)) {
+          Write-Warning "APIs folder does not exist: $apisFolderPath"
+          "api-files-json=[]" >> $env:GITHUB_OUTPUT
+          "has-apis=false" >> $env:GITHUB_OUTPUT
+          exit 0
+        }
+
+        $apiFiles = @()
+        if ($registerOnlyChanged) {
+          try {
+            if ($env:GITHUB_BASE_REF) {
+              $targetBranch = $env:GITHUB_BASE_REF
+              git fetch origin $targetBranch 2>$null
+              $changedFiles = git diff --name-only "origin/$targetBranch...HEAD" -- "$($env:APIS_FOLDER_PATH)" 2>$null
+            } else {
+              $changedFiles = git diff --name-only HEAD~1 -- "$($env:APIS_FOLDER_PATH)" 2>$null
+            }
+            if ($changedFiles) {
+              @($changedFiles -split "`n" | Where-Object { $_ }) | ForEach-Object {
+                $fullPath = Join-Path $sourcesDir $_
+                if ((Test-Path $fullPath) -and ($_ -like $pattern)) { $apiFiles += $fullPath }
+              }
+            }
+          } catch { $registerOnlyChanged = $false }
+        }
+
+        if (-not $registerOnlyChanged -or $apiFiles.Count -eq 0) {
+          $patternFileName = $pattern.Split('/')[-1]
+          $apiFiles = @(Get-ChildItem -Path $apisFolderPath -Recurse -Include $patternFileName -File | ForEach-Object { $_.FullName })
+        }
+
+        if ($apiFiles.Count -eq 0) {
+          "api-files-json=[]" >> $env:GITHUB_OUTPUT
+          "has-apis=false" >> $env:GITHUB_OUTPUT
+          exit 0
+        }
+
+        Write-Information "Found $($apiFiles.Count) API file(s)"
+        $json = $apiFiles | ConvertTo-Json -Compress
+        if ($apiFiles.Count -eq 1) { $json = "[$json]" }
+        "api-files-json=$json" >> $env:GITHUB_OUTPUT
+        "has-apis=true" >> $env:GITHUB_OUTPUT
+
+    - name: Register APIs to API Center
+      id: register
+      if: steps.discover.outputs.has-apis == 'true'
+      shell: pwsh
+      env:
+        SUBSCRIPTION_ID_OVERRIDE: ${{ inputs.subscription-id }}
+        RESOURCE_GROUP_NAME: ${{ inputs.resource-group-name }}
+        API_CENTER_SERVICE_NAME: ${{ inputs.api-center-service-name }}
+        METADATA_FILE_NAME: ${{ inputs.metadata-file-path }}
+        API_FILES_JSON: ${{ steps.discover.outputs.api-files-json }}
+      run: |
+        $ErrorActionPreference = "Continue"
+        $InformationPreference = "Continue"
+
+        if (-not [string]::IsNullOrWhiteSpace($env:SUBSCRIPTION_ID_OVERRIDE)) { az account set --subscription $env:SUBSCRIPTION_ID_OVERRIDE }
+
+        $rg = $env:RESOURCE_GROUP_NAME
+        $svc = $env:API_CENTER_SERVICE_NAME
+        $metadataFileName = $env:METADATA_FILE_NAME
+        $apiFiles = $env:API_FILES_JSON | ConvertFrom-Json
+
+        $standardApiProps = @('description','summary','title','type','externalDocumentation','ExternalDocumentation','contacts','Contacts','license','License')
+        $versionProps = @('lifecycleStage','LifecycleStage','lifecycle-stage')
+
+        $successCount = 0
+        $failCount = 0
+
+        foreach ($apiFilePath in $apiFiles) {
+          Write-Information "=========================================="
+          Write-Information "Registering: $([System.IO.Path]::GetFileName($apiFilePath))"
+          Write-Information "=========================================="
+
+          $apiDir = [System.IO.Path]::GetDirectoryName($apiFilePath)
+          $ext = [System.IO.Path]::GetExtension($apiFilePath)
+
+          $apiTitle = $null; $apiVersion = $null; $apiDescription = $null
+
+          try {
+            $content = Get-Content -Path $apiFilePath -Raw
+            if ($ext -eq ".json") {
+              $spec = $content | ConvertFrom-Json
+              $apiTitle = $spec.info.title
+              $apiVersion = $spec.info.version
+              $apiDescription = $spec.info.description
+            } else {
+              if ($content -match "title:\s*[`"']?([^`"'\r\n]+)") { $apiTitle = $matches[1].Trim() }
+              if ($content -match "version:\s*[`"']?([^`"'\r\n]+)") { $apiVersion = $matches[1].Trim() }
+              if ($content -match "description:\s*[`"']?([^`"'\r\n]+)") { $apiDescription = $matches[1].Trim() }
+            }
+            Write-Information "  Title: $apiTitle"
+            Write-Information "  Version: $apiVersion"
+          } catch { Write-Warning "Could not parse spec: $_" }
+
+          if (-not $apiTitle) { Write-Warning "Could not extract API title, skipping"; $failCount++; continue }
+
+          $apiId = ($apiTitle.ToLower() -replace '[^a-z0-9]', '')
+          $versionId = if ($apiVersion) { ($apiVersion -replace '\.', '-' -replace '[^a-zA-Z0-9-]', '') } else { "v1" }
+          $definitionId = "openapi"
+
+          $customProps = @{}
+          $lifecycleStage = "development"
+          $extDocJson = $null
+
+          if ($metadataFileName) {
+            $metadataFile = Join-Path $apiDir $metadataFileName
+            if (Test-Path $metadataFile) {
+              $metadata = Get-Content -Path $metadataFile -Raw | ConvertFrom-Json
+              $lifecycleStage = $metadata.lifecycleStage
+              if (-not $lifecycleStage) { $lifecycleStage = $metadata.LifecycleStage }
+              if (-not $lifecycleStage) { $lifecycleStage = "development" }
+              $lifecycleStage = $lifecycleStage.ToLower()
+
+              $extDoc = $metadata.externalDocumentation
+              if (-not $extDoc) { $extDoc = $metadata.ExternalDocumentation }
+              if ($extDoc) {
+                if ($extDoc -is [string]) {
+                  $extDocJson = "[{`"title`":`"Documentation`",`"url`":`"$extDoc`"}]"
+                } else {
+                  $docObj = @{ url = $extDoc.url }
+                  if ($extDoc.title) { $docObj.title = $extDoc.title } else { $docObj.title = "Documentation" }
+                  if ($extDoc.description) { $docObj.description = $extDoc.description }
+                  $extDocJson = "[$($docObj | ConvertTo-Json -Compress)]"
+                }
+              }
+
+              $metadata.PSObject.Properties | ForEach-Object {
+                if ($_.Name -notin $standardApiProps -and $_.Name -notin $versionProps) { $customProps[$_.Name] = $_.Value }
+              }
+            }
+          }
+
+          try {
+            $existingApi = az apic api show -g $rg -n $svc --api-id $apiId 2>$null
+            if ($LASTEXITCODE -eq 0 -and $existingApi) {
+              Write-Information "  API exists, updating..."
+              $updateArgs = @("-g", $rg, "-n", $svc, "--api-id", $apiId)
+              if ($customProps.Count -gt 0) { $updateArgs += @("--custom-properties", ($customProps | ConvertTo-Json -Compress)) }
+              if ($extDocJson) { $updateArgs += @("--external-documentation", $extDocJson) }
+              az apic api update @updateArgs 2>&1 | Out-Null
+            } else {
+              Write-Information "  Creating new API..."
+              $createArgs = @("-g", $rg, "-n", $svc, "--api-id", $apiId, "--title", $apiTitle, "--type", "rest")
+              if ($apiDescription) { $createArgs += @("--description", $apiDescription) }
+              if ($customProps.Count -gt 0) { $createArgs += @("--custom-properties", ($customProps | ConvertTo-Json -Compress)) }
+              if ($extDocJson) { $createArgs += @("--external-documentation", $extDocJson) }
+              az apic api create @createArgs
+              if ($LASTEXITCODE -ne 0) { throw "Failed to create API" }
+            }
+
+            $existingVersion = az apic api version show -g $rg -n $svc --api-id $apiId --version-id $versionId 2>$null
+            if ($LASTEXITCODE -eq 0 -and $existingVersion) {
+              az apic api version update -g $rg -n $svc --api-id $apiId --version-id $versionId --lifecycle-stage $lifecycleStage 2>&1 | Out-Null
+            } else {
+              az apic api version create -g $rg -n $svc --api-id $apiId --version-id $versionId --title $versionId --lifecycle-stage $lifecycleStage
+              if ($LASTEXITCODE -ne 0) { throw "Failed to create version" }
+            }
+
+            $existingDef = az apic api definition show -g $rg -n $svc --api-id $apiId --version-id $versionId --definition-id $definitionId 2>$null
+            if (-not ($LASTEXITCODE -eq 0 -and $existingDef)) {
+              az apic api definition create -g $rg -n $svc --api-id $apiId --version-id $versionId --definition-id $definitionId --title "OpenAPI"
+              if ($LASTEXITCODE -ne 0) { throw "Failed to create definition" }
+            }
+
+            $specContent = Get-Content -Path $apiFilePath -Raw
+            $openApiVersion = "3.0"
+            if ($specContent -match "openapi:\s*[`"']?3\.1") { $openApiVersion = "3.1" }
+            elseif ($specContent -match "swagger:\s*[`"']?2") { $openApiVersion = "2.0" }
+
+            az apic api definition import-specification `
+              -g $rg -n $svc `
+              --api-id $apiId `
+              --version-id $versionId `
+              --definition-id $definitionId `
+              --format "inline" `
+              --specification "{`"name`":`"openapi`",`"version`":`"$openApiVersion`"}" `
+              --value $specContent
+
+            if ($LASTEXITCODE -eq 0) {
+              Write-Information "Successfully registered: $apiTitle"
+              $successCount++
+            } else { throw "Failed to import specification" }
+          } catch {
+            Write-Host "::error::Failed to register: $_"
+            $failCount++
+          }
+        }
+
+        Write-Information "Registration: $successCount succeeded, $failCount failed"
+        "fail-count=$failCount" >> $env:GITHUB_OUTPUT
+
+    - name: Registration Summary
+      if: always()
+      shell: pwsh
+      env:
+        HAS_APIS: ${{ steps.discover.outputs.has-apis }}
+        FAIL_COUNT: ${{ steps.register.outputs.fail-count }}
+      run: |
+        Write-Host "=========================================="
+        Write-Host "API Center Registration Summary"
+        Write-Host "=========================================="
+        if ($env:HAS_APIS -ne "true") { Write-Host "No APIs were found to register."; exit 0 }
+        if ($env:FAIL_COUNT -and $env:FAIL_COUNT -ne "" -and [int]$env:FAIL_COUNT -gt 0) {
+          Write-Host "::error::$($env:FAIL_COUNT) API(s) failed to register."
+          exit 1
+        }
+        Write-Host "All APIs registered successfully!"

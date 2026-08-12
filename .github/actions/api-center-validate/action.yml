@@ -1,0 +1,174 @@
+name: 'API Center Validate'
+description: 'Validate API definition files (OpenAPI/Swagger) with optional Spectral linting before registration. Requires a prior azure/login step.'
+
+inputs:
+  apis-folder-path:
+    description: 'Folder containing API definition files.'
+    required: false
+    default: 'APIs'
+  subscription-id:
+    description: 'Azure subscription ID override.'
+    required: false
+    default: ''
+  api-definition-pattern:
+    description: 'Glob pattern for API definition files.'
+    required: false
+    default: '**/*.yaml'
+  enable-spectral:
+    description: 'Enable Spectral linting.'
+    required: false
+    default: 'true'
+  spectral-ruleset-path:
+    description: 'Path to a custom Spectral ruleset (relative to repo root).'
+    required: false
+    default: ''
+  spectral-fail-severity:
+    description: 'Minimum severity to fail (error, warn, info, hint).'
+    required: false
+    default: 'error'
+  apic-extension-version:
+    description: 'Azure CLI apic-extension version.'
+    required: false
+    default: '1.0.0b5'
+
+runs:
+  using: composite
+  steps:
+    - name: Install Node.js
+      if: inputs.enable-spectral == 'true'
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18.x'
+
+    - name: Install Spectral CLI
+      if: inputs.enable-spectral == 'true'
+      shell: bash
+      run: |
+        npm install -g @stoplight/spectral-cli
+        spectral --version
+
+    - name: Validate API Definitions
+      shell: pwsh
+      env:
+        SUBSCRIPTION_ID_OVERRIDE: ${{ inputs.subscription-id }}
+        APIS_FOLDER_PATH: ${{ inputs.apis-folder-path }}
+        API_DEFINITION_PATTERN: ${{ inputs.api-definition-pattern }}
+        ENABLE_SPECTRAL: ${{ inputs.enable-spectral }}
+        SPECTRAL_RULESET_PATH: ${{ inputs.spectral-ruleset-path }}
+        SPECTRAL_FAIL_SEVERITY: ${{ inputs.spectral-fail-severity }}
+        APIC_EXTENSION_VERSION: ${{ inputs.apic-extension-version }}
+      run: |
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = "Stop"
+        $InformationPreference = "Continue"
+
+        $extVersion = $env:APIC_EXTENSION_VERSION
+        Write-Information "Installing apic-extension version: $extVersion"
+        az extension remove --name apic-extension 2>$null
+        az extension add --name apic-extension --version $extVersion --yes
+        az extension show --name apic-extension --query version -o tsv
+
+        if (-not [string]::IsNullOrWhiteSpace($env:SUBSCRIPTION_ID_OVERRIDE)) {
+          az account set --subscription $env:SUBSCRIPTION_ID_OVERRIDE
+        }
+
+        $sourcesDir = "${{ github.workspace }}"
+        $apisFolderPath = "$sourcesDir/$($env:APIS_FOLDER_PATH)"
+        $pattern = $env:API_DEFINITION_PATTERN
+        $enableSpectral = [System.Convert]::ToBoolean($env:ENABLE_SPECTRAL)
+        $spectralRulesetPath = $env:SPECTRAL_RULESET_PATH
+        $spectralFailSeverity = $env:SPECTRAL_FAIL_SEVERITY
+
+        Write-Information "Scanning for API definitions in: $apisFolderPath (pattern: $pattern)"
+
+        if (-not (Test-Path $apisFolderPath)) {
+          Write-Warning "APIs folder does not exist: $apisFolderPath"
+          exit 0
+        }
+
+        $apiFiles = @(Get-ChildItem -Path $apisFolderPath -Recurse -Include $pattern.Split('/')[-1] -File)
+        if ($apiFiles.Count -eq 0) {
+          Write-Warning "No API definition files found matching pattern: $pattern"
+          exit 0
+        }
+
+        Write-Information "Found $($apiFiles.Count) API definition file(s)."
+
+        $hasErrors = $false
+        $hasSpectralFailures = $false
+
+        foreach ($apiFile in $apiFiles) {
+          Write-Information "=========================================="
+          Write-Information "Validating: $($apiFile.Name)"
+          Write-Information "=========================================="
+
+          try {
+            $content = Get-Content -Path $apiFile.FullName -Raw
+
+            if ($apiFile.Extension -eq ".json") {
+              $parsed = $content | ConvertFrom-Json
+              if ($parsed.openapi -or $parsed.swagger) {
+                Write-Information "  Valid OpenAPI/Swagger specification (JSON)"
+                Write-Information "    Title: $($parsed.info.title)"
+                Write-Information "    Version: $($parsed.info.version)"
+              } else {
+                Write-Warning "  File does not appear to be an OpenAPI/Swagger specification"
+              }
+            } elseif ($apiFile.Extension -in @(".yaml", ".yml")) {
+              Write-Information "  YAML file detected"
+            }
+
+            if ($enableSpectral) {
+              Write-Information "Running Spectral linting..."
+              $spectralCmd = "spectral lint `"$($apiFile.FullName)`" --format stylish --format json --output.json `"$sourcesDir/spectral-results-$($apiFile.BaseName).json`""
+
+              if (-not [string]::IsNullOrWhiteSpace($spectralRulesetPath)) {
+                $rulesetFullPath = "$sourcesDir/$spectralRulesetPath"
+                if (Test-Path $rulesetFullPath) {
+                  $spectralCmd += " --ruleset `"$rulesetFullPath`""
+                } else {
+                  Write-Warning "Spectral ruleset not found at: $rulesetFullPath"
+                }
+              } else {
+                $localRuleset = Get-ChildItem -Path $apiFile.DirectoryName -Filter ".spectral.*" -File | Select-Object -First 1
+                if (-not $localRuleset) {
+                  $localRuleset = Get-ChildItem -Path $sourcesDir -Filter ".spectral.*" -File | Select-Object -First 1
+                }
+                if ($localRuleset) {
+                  Write-Information "Using local ruleset: $($localRuleset.FullName)"
+                  $spectralCmd += " --ruleset `"$($localRuleset.FullName)`""
+                }
+              }
+
+              $spectralCmd += " --fail-severity=$spectralFailSeverity"
+              Write-Information "Executing: $spectralCmd"
+              $spectralOutput = Invoke-Expression $spectralCmd 2>&1
+              $spectralExitCode = $LASTEXITCODE
+              $spectralOutput | ForEach-Object { Write-Information $_ }
+
+              if ($spectralExitCode -ne 0) {
+                Write-Host "::error::Spectral linting failed with severity >= $spectralFailSeverity for $($apiFile.Name)"
+                $hasSpectralFailures = $true
+              } else {
+                Write-Information "  Spectral linting passed"
+              }
+            }
+          } catch {
+            Write-Host "::error::Validation failed: $_"
+            $hasErrors = $true
+          }
+        }
+
+        Write-Information "=========================================="
+        Write-Information "Validation Summary"
+        Write-Information "=========================================="
+
+        if ($hasErrors) {
+          Write-Error "One or more API definitions failed basic validation."
+          exit 1
+        }
+        if ($hasSpectralFailures) {
+          Write-Error "One or more API definitions failed Spectral linting (severity >= $spectralFailSeverity)."
+          exit 1
+        }
+        Write-Information "All API definitions validated successfully."

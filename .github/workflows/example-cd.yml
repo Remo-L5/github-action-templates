@@ -1,0 +1,110 @@
+# Example CD caller (equivalent to cd-template.yaml)
+#
+# Azure DevOps drove deployment order via a `projects` array with a `dependencies` list,
+# expanded into stages at compile time. GitHub Actions expresses the same dependency graph
+# with jobs that call reusable workflows and declare `needs:`.
+#
+# Each "project" below is a job that calls one of the reusable workflows in this repo.
+# Wire ordering by adding the upstream job name(s) to `needs:`.
+#
+# Prerequisites (repo or environment scope):
+#   Secrets:  AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
+#             AZURE_PLAN_CLIENT_ID, AZURE_APPLY_CLIENT_ID (Terraform),
+#             AZURE_CLIENT_ID (API-Ops / API Center),
+#             BACKEND_AZURE_RESOURCE_GROUP_NAME, BACKEND_AZURE_STORAGE_ACCOUNT_NAME,
+#             BACKEND_AZURE_STORAGE_ACCOUNT_CONTAINER_NAME
+#   GitHub Environments (for approvals): alz-mgmt-plan, alz-mgmt-apply, apiops-plan, apiops-deploy
+#
+# Runner: set once via the `runs-on` dispatch input (or change the fallback in the `config`
+# job below). The value flows to every job through `needs.config.outputs.runs-on`.
+name: CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs-on:
+        description: 'Runner label for all jobs (e.g. ubuntu-latest or a self-hosted label).'
+        type: string
+        default: 'ubuntu-latest'
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # Resolve the runner label once so every downstream job shares it.
+  config:
+    runs-on: ${{ inputs.runs-on || 'ubuntu-latest' }}
+    outputs:
+      runs-on: ${{ inputs.runs-on || 'ubuntu-latest' }}
+    steps:
+      - run: echo "Runner for this run is ${{ inputs.runs-on || 'ubuntu-latest' }}"
+
+  # projectType: terraform  (name: lz-shared, dependencies: [])
+  lz-shared:
+    needs: [config]
+    uses: ./.github/workflows/terraform.yml
+    with:
+      runs-on: ${{ needs.config.outputs.runs-on }}
+      module-path: '.'
+      terraform-workspace: 'dev'
+      terraform-action: 'apply'
+      plan-environment: 'alz-mgmt-plan'
+      apply-environment: 'alz-mgmt-apply'
+    secrets:
+      azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+      azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      azure-plan-client-id: ${{ secrets.AZURE_PLAN_CLIENT_ID }}
+      azure-apply-client-id: ${{ secrets.AZURE_APPLY_CLIENT_ID }}
+      backend-resource-group: ${{ secrets.BACKEND_AZURE_RESOURCE_GROUP_NAME }}
+      backend-storage-account: ${{ secrets.BACKEND_AZURE_STORAGE_ACCOUNT_NAME }}
+      backend-container: ${{ secrets.BACKEND_AZURE_STORAGE_ACCOUNT_CONTAINER_NAME }}
+
+  # projectType: dotnet  (name: function-dev, dependencies: [lz-shared])
+  function-dev:
+    needs: [config, lz-shared]
+    uses: ./.github/workflows/dotnet.yml
+    with:
+      runs-on: ${{ needs.config.outputs.runs-on }}
+      web-app-projects-path: '**/*.csproj'
+      zip-artifact-name: 'function-app-artifact'
+      dotnet-version: '9.x'
+
+  # projectType: api-ops-cli  (name: publisher-dev, dependencies: [function-dev])
+  publisher-dev:
+    needs: [config, function-dev]
+    uses: ./.github/workflows/api-ops-cli.yml
+    with:
+      runs-on: ${{ needs.config.outputs.runs-on }}
+      artifacts-folder-path: 'apim-artifacts'
+      environment-label: 'dev'
+      resource-group-name: 'rg-api-dev'
+      apim-service-name: 'contoso-apim-dev'
+      commit-id: ${{ github.sha }}
+      plan-environment: 'apiops-plan'
+      deploy-environment: 'apiops-deploy'
+    secrets:
+      azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+      azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+      azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+  # projectType: api-center  (name: apicenter-dev, dependencies: [publisher-dev])
+  apicenter-dev:
+    needs: [config, publisher-dev]
+    uses: ./.github/workflows/api-center.yml
+    with:
+      runs-on: ${{ needs.config.outputs.runs-on }}
+      apis-folder-path: 'APIs'
+      resource-group-name: 'rg-apicenter-dev'
+      api-center-service-name: 'contoso-apicenter-dev'
+      api-definition-pattern: '**/*.yaml'
+      metadata-file-path: 'metadata.json'
+      register-only-changed: true
+      validate-environment: 'apicenter-validate'
+      register-environment: 'apicenter-register'
+    secrets:
+      azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+      azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+      azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}

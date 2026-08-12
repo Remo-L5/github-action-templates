@@ -1,0 +1,127 @@
+# API Center reusable workflow — Validate/Register (equivalent to helpers/api-center/api-center.yaml)
+#
+#   - validate job: validate API definitions (+ optional Spectral linting)
+#   - register job: register APIs to Azure API Center
+name: API Center
+
+on:
+  workflow_call:
+    inputs:
+      apis-folder-path:
+        type: string
+        default: 'APIs'
+      resource-group-name:
+        type: string
+        required: true
+      api-center-service-name:
+        type: string
+        required: true
+      subscription-id-override:
+        type: string
+        default: ''
+      api-definition-pattern:
+        type: string
+        default: '**/*.yaml'
+      metadata-file-path:
+        type: string
+        default: ''
+      register-only-changed:
+        type: boolean
+        default: true
+      enable-spectral:
+        type: boolean
+        default: true
+      spectral-ruleset-path:
+        type: string
+        default: ''
+      spectral-fail-severity:
+        type: string
+        default: 'error'
+      apic-extension-version:
+        type: string
+        default: '1.0.0b5'
+      skip-validate-stage:
+        type: boolean
+        default: false
+      runs-on:
+        description: 'Runner label for all jobs (e.g. ubuntu-latest or a self-hosted label).'
+        type: string
+        default: 'ubuntu-latest'
+      validate-environment:
+        type: string
+        default: 'apicenter-validate'
+      register-environment:
+        type: string
+        default: 'apicenter-register'
+    secrets:
+      azure-client-id:
+        required: true
+      azure-tenant-id:
+        required: true
+      azure-subscription-id:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  validate:
+    name: Validate API Definitions
+    if: ${{ !inputs.skip-validate-stage }}
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.validate-environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.azure-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+
+      - name: Validate
+        uses: ./.github/actions/api-center-validate
+        with:
+          apis-folder-path: ${{ inputs.apis-folder-path }}
+          subscription-id: ${{ inputs.subscription-id-override }}
+          api-definition-pattern: ${{ inputs.api-definition-pattern }}
+          enable-spectral: ${{ inputs.enable-spectral }}
+          spectral-ruleset-path: ${{ inputs.spectral-ruleset-path }}
+          spectral-fail-severity: ${{ inputs.spectral-fail-severity }}
+          apic-extension-version: ${{ inputs.apic-extension-version }}
+
+  register:
+    name: Register APIs to API Center
+    needs: validate
+    if: ${{ always() && (inputs.skip-validate-stage || needs.validate.result == 'success') }}
+    runs-on: ${{ inputs.runs-on }}
+    environment: ${{ inputs.register-environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.azure-client-id }}
+          tenant-id: ${{ secrets.azure-tenant-id }}
+          subscription-id: ${{ secrets.azure-subscription-id }}
+
+      - name: Register
+        uses: ./.github/actions/api-center-register
+        with:
+          apis-folder-path: ${{ inputs.apis-folder-path }}
+          resource-group-name: ${{ inputs.resource-group-name }}
+          api-center-service-name: ${{ inputs.api-center-service-name }}
+          subscription-id: ${{ inputs.subscription-id-override }}
+          api-definition-pattern: ${{ inputs.api-definition-pattern }}
+          metadata-file-path: ${{ inputs.metadata-file-path }}
+          register-only-changed: ${{ inputs.register-only-changed }}
+          apic-extension-version: ${{ inputs.apic-extension-version }}

@@ -1,0 +1,46 @@
+# Example CI caller (equivalent to ci-template.yaml)
+#
+# Runs Terraform validation (fmt/init/validate) and a review plan on pull requests.
+#
+# Runner: set once via the `runs-on` dispatch input (or change the fallback in the `config`
+# job below). Pull-request runs use the fallback; manual runs can override it.
+name: CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs-on:
+        description: 'Runner label for all jobs (e.g. ubuntu-latest or a self-hosted label).'
+        type: string
+        default: 'ubuntu-latest'
+  pull_request:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # Resolve the runner label once so every downstream job shares it.
+  config:
+    runs-on: ${{ inputs.runs-on || 'ubuntu-latest' }}
+    outputs:
+      runs-on: ${{ inputs.runs-on || 'ubuntu-latest' }}
+    steps:
+      - run: echo "Runner for this run is ${{ inputs.runs-on || 'ubuntu-latest' }}"
+
+  terraform-ci:
+    needs: [config]
+    uses: ./.github/workflows/ci.yml
+    with:
+      runs-on: ${{ needs.config.outputs.runs-on }}
+      module-path: '.'
+      terraform-workspace: 'dev'
+      environment: 'alz-mgmt-plan'
+    secrets:
+      azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+      azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      azure-plan-client-id: ${{ secrets.AZURE_PLAN_CLIENT_ID }}
+      backend-resource-group: ${{ secrets.BACKEND_AZURE_RESOURCE_GROUP_NAME }}
+      backend-storage-account: ${{ secrets.BACKEND_AZURE_STORAGE_ACCOUNT_NAME }}
+      backend-container: ${{ secrets.BACKEND_AZURE_STORAGE_ACCOUNT_CONTAINER_NAME }}
