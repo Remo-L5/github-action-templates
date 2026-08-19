@@ -95,6 +95,7 @@ Installs the SDK, builds, publishes, and uploads the output artifact.
 
 ### `api-ops-cli.yml` — APIOps CLI (Azure/apiops-cli)
 Node.js-based equivalent. `plan` runs `apiops publish --dry-run`; `deploy` runs `apiops publish`.
+Set `apiops-api-version` to override the Azure API Management REST API version used by the CLI; it defaults to `2024-05-01`.
 
 ### `api-center.yml` — Azure API Center
 `validate` job (OpenAPI/Swagger + optional Spectral lint); `register` job (create + import to API Center).
