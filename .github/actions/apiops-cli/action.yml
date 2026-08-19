@@ -119,12 +119,6 @@ runs:
           $apiopsArgs += $commitId
         }
 
-        $specFormat = "${{ inputs.spec-format }}"
-        if (-not [string]::IsNullOrWhiteSpace($specFormat)) {
-          $apiopsArgs += "--spec-format"
-          $apiopsArgs += $specFormat
-        }
-
         Write-Host "Running: apiops $($apiopsArgs -join ' ')"
         & apiops @apiopsArgs
         $exitCode = $LASTEXITCODE
