@@ -32,6 +32,9 @@ on:
       apiops-cli-version:
         type: string
         default: 'latest'
+      apiops-api-version:
+        type: string
+        default: '2024-05-01'
       spec-format:
         type: string
         default: ''
@@ -90,6 +93,7 @@ jobs:
           overrides-file-path: ${{ inputs.overrides-file-path }}
           commit-id: ${{ inputs.commit-id }}
           apiops-cli-version: ${{ inputs.apiops-cli-version }}
+          apiops-api-version: ${{ inputs.apiops-api-version }}
           spec-format: ${{ inputs.spec-format }}
           dry-run: 'true'
 
@@ -123,5 +127,6 @@ jobs:
           overrides-file-path: ${{ inputs.overrides-file-path }}
           commit-id: ${{ inputs.commit-id }}
           apiops-cli-version: ${{ inputs.apiops-cli-version }}
+          apiops-api-version: ${{ inputs.apiops-api-version }}
           spec-format: ${{ inputs.spec-format }}
           dry-run: 'false'
