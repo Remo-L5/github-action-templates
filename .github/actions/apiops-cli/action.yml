@@ -102,8 +102,7 @@ runs:
           "--resource-group", "${{ inputs.resource-group-name }}",
           "--service-name",   "${{ inputs.apim-service-name }}",
           "--source",         "${{ github.workspace }}/${{ inputs.artifacts-folder-path }}",
-          "--subscription-id","${{ steps.sub.outputs.subscription-id }}",
-          "--api-version",    "${{ inputs.apiops-api-version }}"
+          "--subscription-id","${{ steps.sub.outputs.subscription-id }}"
         )
 
         if ("${{ inputs.dry-run }}" -eq "true") { $apiopsArgs += "--dry-run" }
